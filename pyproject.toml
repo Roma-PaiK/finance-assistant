@@ -1,0 +1,19 @@
+[project]
+name = "finance-assistant"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "camelot-py[cv]>=0.11.0",
+    "msoffcrypto-tool>=6.0.0",
+    "openpyxl>=3.1.0",
+    "pandas>=2.0.0",
+    "pdfplumber>=0.10.3",
+    "pikepdf>=8.0.0",
+    "python-dateutil>=2.8.2",
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    "splitwise>=2.3.0",
+    "streamlit>=1.35.0",
+]

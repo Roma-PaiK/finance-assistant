@@ -1,0 +1,147 @@
+# Rule-based categorization
+# Each rule: list of keywords (case-insensitive) matched against transaction description
+# First match wins. Order matters — put specific rules before generic ones.
+
+categories:
+  Food & Dining:
+    - swiggy
+    - zomato
+    - restaurant
+    - cafe
+    - pizza
+    - burger
+    - biryani
+    - hotel
+    - dhaba
+    - udupi
+
+  Groceries:
+    - bigbasket
+    - blinkit
+    - grofers
+    - dmart
+    - reliance fresh
+    - more supermarket
+    - supermarket
+    - grocery
+    - vegetables
+    - zepto
+
+  Shopping:
+    - amazon
+    - flipkart
+    - myntra
+    - ajio
+    - meesho
+    - nykaa
+    - snapdeal
+    - retail
+
+  Fuel & Transport:
+    - petrol
+    - diesel
+    - fuel
+    - hp petrol
+    - indian oil
+    - bharat petroleum
+    - uber
+    - ola
+    - rapido
+    - metro
+    - irctc
+    - railway
+
+  Entertainment:
+    - netflix
+    - spotify
+    - prime video
+    - hotstar
+    - bookmyshow
+    - pvr
+    - inox
+    - youtube
+
+  Utilities & Bills:
+    - electricity
+    - bescom
+    - msedcl
+    - tata power
+    - water bill
+    - gas bill
+    - broadband
+    - airtel
+    - jio
+    - vi
+    - bsnl
+    - recharge
+    - postpaid
+
+  Health & Medical:
+    - pharmacy
+    - medical
+    - hospital
+    - apollo
+    - medplus
+    - netmeds
+    - 1mg
+    - doctor
+    - clinic
+    - diagnostic
+
+  Education:
+    - education
+    - course
+    - udemy
+    - coursera
+    - fees
+    - tuition
+
+  EMI & Loan:
+    - emi
+    - loan
+    - repayment
+    - education loan
+    - home loan
+
+  Investment & SIP:
+    - sip
+    - mutual fund
+    - groww
+    - zerodha
+    - coin
+    - investment
+    - nps
+    - ppf
+
+  Rent:
+    - rent
+    - house rent
+
+  Credit Card Payment:
+    - credit card payment
+    - cc payment
+    - card payment
+    - bill payment hdfc
+    - bill payment icici
+    - bill payment axis
+
+  Internal Transfer:
+    - neft
+    - imps
+    - rtgs
+    - upi transfer
+    - self transfer
+
+  ATM & Cash:
+    - atm
+    - cash withdrawal
+    - cdm
+
+  Subscriptions:
+    - subscription
+    - annual fee
+    - membership
+
+  Other:
+    - misc
+    - general

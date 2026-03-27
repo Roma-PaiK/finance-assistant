@@ -1,0 +1,24 @@
+# PDF parsing
+pdfplumber>=0.10.3
+camelot-py[cv]>=0.11.0
+pikepdf>=8.0.0
+
+# Excel
+pandas>=2.0.0
+openpyxl>=3.1.0
+xlrd>=2.0.1
+
+# Config
+pyyaml>=6.0
+
+# UI
+streamlit>=1.35.0
+
+# HTTP (Ollama, Splitwise)
+requests>=2.31.0
+
+# Splitwise
+splitwise>=2.3.0
+
+# Utilities
+python-dateutil>=2.8.2
