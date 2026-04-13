@@ -76,7 +76,7 @@ BANK_CONFIGS = {
     },
     "hdfc_bank": {
         "detect_keywords": ["hdfc"],
-        "detect_exclude":  ["millenia", "cc", "credit"],   # exclude CC files
+        "detect_exclude":  ["moneyback", "cc", "credit"],   # exclude CC files
         "password_key": "hdfc_bank",
         "account_id": "acc_hdfc_emi",
         "date_formats": ["%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d/%m/%y"],
@@ -100,7 +100,7 @@ BANK_CONFIGS = {
         "password_key": "canara",
         "account_id": "acc_canara_daily",
         "date_formats": ["%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d.%m.%Y", "%d/%m/%y"],
-        "date_cols":   ["date", "txn date", "value date", "tran date"],
+        "date_cols":   ["value date", "date", "txn date", "tran date"],
         "desc_cols":   ["particulars", "narration", "description", "details", "remarks", "transaction details"],
         "debit_cols":  ["withdrawals", "withdrawal", "debit", "dr"],
         "credit_cols": ["deposits", "deposit", "credit", "cr"],
@@ -109,9 +109,9 @@ BANK_CONFIGS = {
     # ── Credit cards ───────────────────────────────────────────────────────────
     "hdfc_cc": {
         "detect_keywords": ["hdfc"],
-        "detect_require":  ["millenia", "cc", "credit"],   # must match one of these
+        "detect_require":  ["moneyback", "cc", "credit"],   # must match one of these
         "password_key": "hdfc_cc",
-        "account_id": "cc_hdfc_millenia",
+        "account_id": "cc_hdfc_moneyback",
         "date_formats": ["%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d/%m/%y", "%d %b '%y"],
         "date_cols":   ["date", "transaction date"],
         "desc_cols":   ["description", "narration", "particulars", "merchant", "details"],
@@ -149,7 +149,7 @@ ALL_HEADER_KEYWORDS = {
     "details", "description", "narration", "particulars", "remarks",
     "transaction details", "debit", "credit", "withdrawal", "deposit",
     "withdrawals", "deposits", "balance", "ref no", "cheque no",
-    "amount", "dr", "cr",
+    "amount", "dr", "cr", "branch code",
 }
 
 
@@ -167,7 +167,7 @@ class SmartParser:
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def can_parse(self, file_path: str) -> bool:
-        fp = file_path.lower()
+        fp = os.path.basename(file_path).lower()
         cfg = self.cfg
         # Must match at least one detect keyword
         if not any(kw in fp for kw in cfg["detect_keywords"]):
@@ -186,6 +186,8 @@ class SmartParser:
         ext = file_path.lower()
         if ext.endswith(".xlsx") or ext.endswith(".xls"):
             df = self._read_excel(file_path, password)
+        elif ext.endswith(".csv"):
+            df = self._read_csv(file_path)
         else:
             df = self._read_pdf(file_path, password)
 
@@ -240,6 +242,39 @@ class SmartParser:
             pass
 
         return None
+
+    def _read_csv(self, path: str) -> Optional[pd.DataFrame]:
+        """Read CSV file with lenient parsing.
+        For bank statements with metadata at top, skip to transaction table.
+        """
+        try:
+            # First, try to find where the transaction table starts
+            # Look for a line with transaction header keywords
+            header_row_num = None
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line_num, line in enumerate(f):
+                    line_lower = line.lower()
+                    # Count how many header keywords appear in this line
+                    keyword_count = sum(1 for kw in ALL_HEADER_KEYWORDS if kw in line_lower)
+                    if keyword_count >= 2:
+                        header_row_num = line_num
+                        break
+
+            # If we found a header row, skip to it; otherwise read from top
+            skiprows = header_row_num if header_row_num is not None else 0
+
+            # Try with explicit comma separator
+            df = pd.read_csv(path, header=None, sep=',', engine='python', quoting=3,
+                           on_bad_lines='skip', skiprows=skiprows)
+            return df if not df.empty else None
+        except Exception:
+            try:
+                # Fallback: try without skiprows
+                df = pd.read_csv(path, header=None, sep=',', engine='python', quoting=3, on_bad_lines='skip')
+                return df if not df.empty else None
+            except Exception as e:
+                print(f"   ⚠️  CSV read failed: {e}")
+                return None
 
     def _read_pdf(self, path: str, password: str) -> Optional[pd.DataFrame]:
         """Unlock PDF if needed, extract all tables, concatenate into one df."""
@@ -347,12 +382,34 @@ class SmartParser:
     # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _find_header_row(self, df: pd.DataFrame) -> Optional[int]:
-        """Scan rows top-down; return index of first row with 2+ header keywords."""
+        """Scan rows top-down; return index of first row with 2+ header keywords.
+        Also look for rows with many non-null values (likely transaction table headers).
+        """
+        best_row = None
+        best_score = 0
+
         for i, row in df.iterrows():
+            non_null_count = pd.notna(row).sum()
             vals = [str(v).strip().lower() for v in row.values if pd.notna(v)]
-            hits = sum(1 for v in vals if any(kw in v for kw in ALL_HEADER_KEYWORDS))
-            if hits >= 2:
+
+            # Count exact keyword matches
+            exact_hits = sum(1 for v in vals if v in ALL_HEADER_KEYWORDS)
+            substring_hits = sum(1 for v in vals if any(kw in v for kw in ALL_HEADER_KEYWORDS))
+
+            # Prefer rows with exact matches
+            if exact_hits >= 2 and non_null_count >= 5:
                 return i
+
+            # Also look for rows with many columns and substring matches
+            # (handles cases where keywords appear with different formatting)
+            score = (exact_hits * 10) + (substring_hits * 2) + (non_null_count // 2)
+            if score > best_score:
+                best_score = score
+                best_row = i
+
+        # Return best row if it has reasonable keyword matches
+        if best_score >= 5:
+            return best_row
         return None
 
     def _match_col(self, df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
@@ -365,6 +422,10 @@ class SmartParser:
 
     def _parse_date(self, val: str) -> Optional[datetime.date]:
         val = val.strip()
+        # Remove Excel formula syntax if present (e.g., ="02 Jan 2025")
+        val = re.sub(r'^=?"(.+)"$', r'\1', val)
+        val = val.strip()
+
         for fmt in self.cfg["date_formats"]:
             try:
                 return datetime.strptime(val, fmt).date()
@@ -375,7 +436,12 @@ class SmartParser:
     def _clean_amount(self, val) -> float:
         if val is None:
             return 0.0
-        s = re.sub(r'[₹,\s]', '', str(val))
+        s = str(val)
+        # Remove Excel formula syntax if present
+        s = re.sub(r'^=?"(.+)"$', r'\1', s)
+        # Remove currency symbols and formatting
+        s = re.sub(r'[₹,\s]', '', s)
+        # Remove Cr/Dr suffix
         s = re.sub(r'[CcDd][Rr]$', '', s).strip()
         try:
             return abs(float(s))
