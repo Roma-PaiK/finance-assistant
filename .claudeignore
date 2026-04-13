@@ -1,0 +1,16 @@
+# Passwords and sensitive config
+config/passwords.yaml
+config/accounts.yaml
+
+# Bank statements (raw files)
+data/
+*.pdf
+*.xlsx
+*.xls
+*.csv
+
+# Database
+*.db
+
+# Dry run outputs
+dry_run_*.csv

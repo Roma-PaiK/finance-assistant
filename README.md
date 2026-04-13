@@ -44,7 +44,7 @@ uv run main.py sbi_jan.xlsx canara_jan.pdf hdfc_cc_jan.pdf
 > | HDFC EMI account | `hdfc_bank_jan2025.pdf` |
 > | Bank of Baroda SIP | `bob_jan2025.pdf` |
 > | Canara daily | `canara_jan2025.pdf` |
-> | HDFC Millennia CC | `hdfc_millenia_jan2025.pdf` or `hdfc_cc_jan2025.pdf` |
+> | HDFC moneyback CC | `hdfc_moneyback_jan2025.pdf` or `hdfc_cc_jan2025.pdf` |
 > | Amazon ICICI CC | `amazon_icici_jan2025.pdf` |
 > | SuperMoney Axis CC | `axis_jan2025.pdf` or `supermoney_jan2025.pdf` |
 
@@ -125,7 +125,7 @@ uv run clear_db.py --source acc_sbi_salary --month 2025-01
 > | HDFC EMI | `acc_hdfc_emi` |
 > | Bank of Baroda SIP | `acc_bob_sip` |
 > | Canara daily | `acc_canara_daily` |
-> | HDFC Millennia CC | `cc_hdfc_millenia` |
+> | HDFC moneyback CC | `cc_hdfc_moneyback` |
 > | Amazon ICICI CC | `cc_amazon_icici` |
 > | SuperMoney Axis CC | `cc_supermoney_axis` |
 
