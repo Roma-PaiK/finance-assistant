@@ -13,5 +13,8 @@ __pycache__/
 venv/
 .venv/
 
+# IDE
+*.code-workspace
+
 # Mac
 .DS_Store
