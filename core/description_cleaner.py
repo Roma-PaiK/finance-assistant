@@ -1,17 +1,18 @@
 """
-Cleans raw SBI (and other bank) transaction descriptions into human-readable form.
+Cleans raw bank transaction descriptions into:
+  - canonical_merchant : stable key for the corrections DB (e.g. "Zomato", "Flipkart")
+  - clean_description  : human-readable display string (e.g. "UPI - Zomato")
 
-SBI raw format examples:
-  "WDL TFR   IMPS/508417989983/CNRB-xx183-Roma Can/0098288162094 AT 21216 DOMALGUDA"
-  "WDL TFR   UPI/DR/508458544571/KARKALA/CNRB/9381461575/NA"
-  "DEP TFR   CMP BAJAJ FINANCE LTD   0041425814297 OF BAJAJ FINANCE LTD AT 21216"
-  "INT.CR-SAVINGS BANK INTEREST"
+Supported raw formats (from real statements):
 
-Cleaned output:
-  "IMPS to Roma Canara (CNRB)"
-  "UPI to KARKALA"
-  "Salary - BAJAJ FINANCE LTD"
-  "Interest Credit"
+  HDFC Bank savings  : UPI-FLIPKART-PAYTM-648052425@PTYBL-YESBOPT00000050022477817679
+  SBI/Canara savings : UPI/DR/508458544571/KARKALA/CNRB/9381461575/NA
+  SBI/Canara savings : UPI/DB/500264178779/CRED RENT/UTIB/** rent@axisb/payment //...
+  SBI savings (IMPS) : MOB-IMPS-CR/Karkala Ro/The State /40550645841/ReqPay/...
+  Axis CC            : UPI/ZOMATO/9845-9845@PTYBL/HDFC00315IG17S
+  Axis CC            : UPI/SMALL MARKET PRATAPNA/UPI@PTYBL/STBC00123NG66
+  ICICI / HDFC CC    : AMAZON-MINI CRED S AMAZON IN
+  All banks          : NEFT, ACH DR/CR, ATM WDL, POS, CMP (salary), INT.CR
 """
 
 import re
@@ -20,12 +21,98 @@ import os
 
 ACCOUNTS_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "accounts.yaml")
 
+# IFSC-prefix → bank display name
+BANK_CODE_MAP = {
+    "cnrb": "Canara Bank",
+    "hdfc": "HDFC Bank",
+    "sbin": "SBI",
+    "icic": "ICICI Bank",
+    "utib": "Axis Bank",
+    "barb": "Bank of Baroda",
+    "punb": "Punjab National Bank",
+    "kkbk": "Kotak Bank",
+    "ioba": "Indian Overseas Bank",
+    "ptybl": "Paytm Bank",
+    "yesbopt": "Yes Bank",
+}
+
+# Trailing noise common in CC merchant strings
+_CC_LOCATION_NOISE = re.compile(
+    r'\s+(?:IN|LTD|PVT|PRIVATE|LIMITED|INDIA|NEW DELHI|MUMBAI|BANGALORE|'
+    r'HYDERABAD|CHENNAI|PUNE|KOLKATA|CART|MINI|STORE)\.?$',
+    re.IGNORECASE,
+)
+
+# Patterns to strip from any description
+_LONG_REF = re.compile(r'\b\d{7,}\b')
+_DATE_SUFFIX = re.compile(r'\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}.*$')
+_AT_BRANCH = re.compile(r'\s+AT\s+\d+\s+\w+.*$', re.IGNORECASE)
+_OF_BRANCH = re.compile(r'\s+OF\s+\w+\s+AT.*$', re.IGNORECASE)
+
+# SBI statement prefix tokens to drop after main extraction
+_SBI_PREFIXES = ("WDL TFR", "DEP TFR", "INT CR", "INT.CR",
+                 "ACH DR", "ACH CR", "ATM WDL", "POS DR", "CLG DR", "CLG CR")
+
+# Patterns that indicate salary / payroll
+_SALARY_HINTS = re.compile(
+    r'bajaj\s*finance|salary|sal\s*cr|payroll|sal/|cmp\s+.+\s+ltd',
+    re.IGNORECASE,
+)
+
+
+# ── Public API ─────────────────────────────────────────────────────────────────
+
+def get_canonical_merchant(raw: str) -> str:
+    """
+    Returns a stable, title-cased merchant name for use as the corrections DB key.
+
+    Examples:
+      "UPI-FLIPKART-PAYTM-648052425@PTYBL-YESBOPT..." → "Flipkart Paytm"
+      "UPI/DR/508458544571/KARKALA/CNRB/..."           → "Karkala"
+      "UPI/DB/500264178779/CRED RENT/UTIB/..."         → "Cred Rent"
+      "UPI/ZOMATO/9845-9845@PTYBL/HDFC..."             → "Zomato"
+      "MOB-IMPS-CR/Karkala Ro/The State /..."          → "Karkala Ro"
+      "INT.CR-SAVINGS BANK INTEREST"                    → "Interest Credit"
+      "ATM WDL/..."                                     → "ATM Withdrawal"
+    """
+    raw_merchant, _ = _extract(raw)
+    return _normalize(raw_merchant)
+
+
+def clean_description(raw: str) -> str:
+    """
+    Returns a human-readable description for display / transaction list.
+
+    Examples:
+      "UPI-FLIPKART-PAYTM-648052425@PTYBL-..."  → "UPI - Flipkart Paytm"
+      "UPI/DR/508458544571/KARKALA/..."          → "UPI - Karkala"
+      "MOB-IMPS-CR/Karkala Ro/..."               → "IMPS - Karkala Ro"
+      "ACH DR HDFC ERGO GENERAL..."              → "Auto Debit - Hdfc Ergo General"
+      "INT.CR-SAVINGS BANK INTEREST"             → "Interest Credit"
+    """
+    if not raw:
+        return raw
+    merchant, txn_type = _extract(raw)
+    merchant = _normalize(merchant)
+
+    prefix_map = {
+        "upi":      "UPI - ",
+        "imps":     "IMPS - ",
+        "neft":     "NEFT - ",
+        "ach_dr":   "Auto Debit - ",
+        "ach_cr":   "Auto Credit - ",
+        "pos":      "Card Purchase - ",
+        "atm":      "",
+        "interest": "",
+        "salary":   "Salary - ",
+        "payment":  "Payment from ",
+        "other":    "",
+    }
+    return prefix_map.get(txn_type, "") + merchant
+
 
 def load_account_hints() -> dict:
-    """
-    Load account identifiers so we can name internal transfers properly.
-    Returns dict like: {"cnrb": "Canara Daily", "hdfc": "HDFC EMI", "bob": "BOB SIP"}
-    """
+    """Load own-account identifiers for internal-transfer labelling."""
     try:
         with open(ACCOUNTS_PATH) as f:
             cfg = yaml.safe_load(f)
@@ -42,140 +129,125 @@ def load_account_hints() -> dict:
         return {}
 
 
-# Bank code → readable name (for IMPS/NEFT descriptions)
-BANK_CODE_MAP = {
-    "cnrb": "Canara Bank",
-    "hdfc": "HDFC Bank",
-    "sbin": "SBI",
-    "icic": "ICICI Bank",
-    "utib": "Axis Bank",
-    "barb": "Bank of Baroda",
-    "punb": "Punjab National Bank",
-    "kkbk": "Kotak Bank",
-    "ioba": "Indian Overseas Bank",
-}
+# ── Core extraction ────────────────────────────────────────────────────────────
 
-# SBI prefix codes → human meaning
-SBI_PREFIX_MAP = {
-    "wdl tfr": "Transfer Out",
-    "dep tfr": "Transfer In",
-    "int.cr": "Interest Credit",
-    "int cr": "Interest Credit",
-    "ach dr": "Auto Debit",
-    "ach cr": "Auto Credit",
-    "atm wdl": "ATM Withdrawal",
-    "pos dr": "POS Purchase",
-    "clg dr": "Cheque Debit",
-    "clg cr": "Cheque Credit",
-    "cmp": "Company Payment",
-}
-
-# Salary / payroll indicators
-SALARY_PATTERNS = [
-    r"bajaj finance",
-    r"salary",
-    r"sal cr",
-    r"payroll",
-    r"sal/",
-    r"cmp .+ ltd",   # "CMP SOME COMPANY LTD" = company payment = likely salary
-]
-
-
-def clean_description(raw: str) -> str:
+def _extract(raw: str) -> tuple[str, str]:
     """
-    Main cleaner. Returns a short, readable description.
-    Also returns a hint for categorization.
+    Returns (merchant_string, txn_type_key).
+    txn_type_key is one of: upi | imps | neft | ach_dr | ach_cr |
+                             pos | atm | interest | salary | payment | other
     """
     if not raw:
-        return raw
+        return raw, "other"
 
-    text = " ".join(raw.split())  # collapse whitespace/newlines
-    text_lower = text.lower()
+    text = " ".join(raw.split())   # collapse whitespace / newlines
 
-    # --- Interest credit ---
-    if "int.cr" in text_lower or "int cr" in text_lower or "savings bank interest" in text_lower:
-        return "Interest Credit"
+    # ── 1. Interest credit ─────────────────────────────────────────────────
+    if re.search(r'INT\.?CR|SAVINGS BANK INTEREST', text, re.IGNORECASE):
+        return "Interest Credit", "interest"
 
-    # --- ATM withdrawal ---
-    if "atm wdl" in text_lower or "atm/" in text_lower:
-        location = _extract_after(text, ["ATM/", "ATM WDL"], stop_at=["AT ", "0098", "0041"])
-        return f"ATM Withdrawal{' - ' + location if location else ''}"
+    # ── 2. ATM / cash withdrawal ───────────────────────────────────────────
+    if re.search(r'ATM\s*WDL|ATM/|CASH WITHDRAWAL', text, re.IGNORECASE):
+        return "ATM Withdrawal", "atm"
 
-    # --- IMPS transfer ---
-    imps_match = re.search(r"IMPS/\d+/([^/\s]+)-?(?:xx\d+)?-?([^/\s]*)", text, re.IGNORECASE)
-    if imps_match:
-        bank_code = imps_match.group(1).lower()
-        name_part = imps_match.group(2).strip()
-        bank_name = BANK_CODE_MAP.get(bank_code[:4], bank_code.upper())
-        direction = "to" if "wdl" in text_lower else "from"
-        label = f"IMPS {direction} {name_part}" if name_part else f"IMPS {direction} {bank_name}"
-        return label.title()
+    # ── 3. HDFC savings UPI ────────────────────────────────────────────────
+    #   Format: UPI-MERCHANT-VPA@PSP-BANKREF
+    #   e.g.    UPI-FLIPKART-PAYTM-648052425@PTYBL-YESBOPT00000050022477817679
+    #           UPI-SWIGGY-6789@OKICICI-HDFC0001XYZ
+    m = re.match(r'UPI-(.+?)-\d{7,}@', text, re.IGNORECASE)
+    if m:
+        return m.group(1).replace('-', ' ').strip(), "upi"
 
-    # --- UPI transfer ---
-    upi_match = re.search(r"UPI/(?:DR|CR)/\d+/([^/\s]+)", text, re.IGNORECASE)
-    if upi_match:
-        payee = upi_match.group(1).strip()
-        direction = "to" if "/DR/" in text.upper() else "from"
-        return f"UPI {direction} {payee}".title()
+    # Variant: no numeric segment before @  (e.g. UPI-MERCHANTNAME@VPA-REF)
+    m = re.match(r'UPI-([^@\d][^@]*?)@', text, re.IGNORECASE)
+    if m:
+        return m.group(1).replace('-', ' ').strip(), "upi"
 
-    upi_match2 = re.search(r"UPI-([^-\s/]+)", text, re.IGNORECASE)
-    if upi_match2:
-        payee = upi_match2.group(1).strip()
-        return f"UPI - {payee}".title()
+    # ── 4. SBI / Canara savings UPI ────────────────────────────────────────
+    #   Format: UPI/DR|CR|DB/REFNUM/MERCHANT NAME/BANKCODE/VPA/...
+    #   e.g.    UPI/DR/508458544571/KARKALA/CNRB/9381461575/NA
+    #           UPI/DB/500264178779/CRED RENT/UTIB/** rent@axisb/payment //...
+    m = re.match(r'UPI/(?:DR|CR|DB)/\d+/([^/]+)', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip(), "upi"
 
-    # --- NEFT ---
-    neft_match = re.search(r"NEFT\*[^*]+\*[^*]+\*([^*\d]+?)(?:\s+\d{6,}|\s+AT\s|$)", text, re.IGNORECASE)
-    if neft_match:
-        payee = neft_match.group(1).strip()
-        direction = "to" if any(x in text_lower[:20] for x in ["wdl", "dr"]) else "from"
-        return f"NEFT {direction} {payee}".title()
+    # ── 5. Axis CC / HDFC CC UPI ───────────────────────────────────────────
+    #   Format: UPI/MERCHANT NAME/VPA@PSP/TXNREF
+    #   e.g.    UPI/ZOMATO/9845-9845@PTYBL/HDFC00315IG17S
+    #           UPI/SMALL MARKET PRATAPNA/UPI@PTYBL/STBC00123NG66
+    #   Key difference from savings: no DR/CR/DB keyword, merchant comes first
+    m = re.match(r'UPI/([A-Za-z][^/]+)/[^/]*@[^/]*/[A-Z0-9]+', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip(), "upi"
+    # Looser fallback for CC UPI (fewer segments)
+    m = re.match(r'UPI/([A-Za-z][^/\d][^/]*)/', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip(), "upi"
 
-    # --- Company/Salary payment (CMP prefix) ---
-    cmp_match = re.search(r"CMP\s+(.+?)(?:\s{2,}|\s+\d{10,})", text, re.IGNORECASE)
-    if cmp_match:
-        company = cmp_match.group(1).strip()
-        # Check if it looks like salary
-        if any(re.search(p, company, re.IGNORECASE) for p in SALARY_PATTERNS):
-            return f"Salary - {company.title()}"
-        return f"Payment from {company.title()}"
+    # ── 6. MOB-IMPS (SBI savings) ──────────────────────────────────────────
+    #   Format: MOB-IMPS-CR|DR/PAYEE NAME/BANK NAME/ACCT/ReqPay/...
+    #   e.g.    MOB-IMPS-CR/Karkala Ro/The State /40550645841/ReqPay/...
+    m = re.match(r'MOB-IMPS-(?:CR|DR)/([^/]+)/', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip(), "imps"
 
-    # --- ACH (auto debit/credit — EMI, SIP etc.) ---
-    ach_match = re.search(r"ACH\s+(DR|CR)\s+(.+?)(?:\s{2,}|\s+\d{8,})", text, re.IGNORECASE)
-    if ach_match:
-        direction = "Debit" if ach_match.group(1).upper() == "DR" else "Credit"
-        entity = ach_match.group(2).strip()
-        return f"Auto {direction} - {entity.title()}"
+    # ── 7. Classic IMPS ────────────────────────────────────────────────────
+    #   Format: IMPS/REFNUM/BANKCODE-xxLAST4-PAYEE/...
+    m = re.search(r'IMPS/\d+/([^/\s]+)-?(?:xx\d+)?-?([^/\s]*)', text, re.IGNORECASE)
+    if m:
+        bank_code = m.group(1).lower()
+        name_part = m.group(2).strip()
+        if name_part:
+            return name_part, "imps"
+        return BANK_CODE_MAP.get(bank_code[:4], bank_code.upper()), "imps"
 
-    # --- POS / card swipe ---
-    pos_match = re.search(r"POS\s+(?:DR\s+)?(.+?)(?:\s{2,}|\s+\d{6,})", text, re.IGNORECASE)
-    if pos_match:
-        merchant = pos_match.group(1).strip()
-        return f"Card Purchase - {merchant.title()}"
+    # ── 8. NEFT ────────────────────────────────────────────────────────────
+    m = re.search(r'NEFT\*[^*]+\*[^*]+\*([^*\d]+?)(?:\s+\d{6,}|\s+AT\s|$)', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip(), "neft"
 
-    # --- Fallback: strip noise, return meaningful part ---
-    # Remove reference numbers (long digit sequences), branch codes, AT XXXX patterns
-    cleaned = re.sub(r'\b\d{8,}\b', '', text)           # long ref numbers
-    cleaned = re.sub(r'AT \d+ \w+.*$', '', cleaned)     # "AT 21216 DOMALGUDA..."
-    cleaned = re.sub(r'OF \w+ AT.*$', '', cleaned)      # "OF BAJAJ... AT..."
-    cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
+    # ── 9. ACH auto-debit / auto-credit (SIP, EMI, insurance premiums) ────
+    m = re.search(r'ACH\s+(DR|CR)\s+(.+?)(?:\s{2,}|\s+\d{8,}|$)', text, re.IGNORECASE)
+    if m:
+        direction = m.group(1).upper()
+        entity = m.group(2).strip()
+        return entity, "ach_dr" if direction == "DR" else "ach_cr"
 
-    # Remove SBI prefixes like "WDL TFR", "DEP TFR"
-    for prefix in SBI_PREFIX_MAP:
-        if cleaned.lower().startswith(prefix):
+    # ── 10. POS (card swipe at terminal) ──────────────────────────────────
+    m = re.search(r'POS\s+(?:DR\s+)?(.+?)(?:\s{2,}|\s+\d{6,}|$)', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip(), "pos"
+
+    # ── 11. CMP (company payment / salary — SBI) ──────────────────────────
+    m = re.search(r'CMP\s+(.+?)(?:\s{2,}|\s+\d{10,}|$)', text, re.IGNORECASE)
+    if m:
+        company = m.group(1).strip()
+        txn_key = "salary" if _SALARY_HINTS.search(company) else "payment"
+        return company, txn_key
+
+    # ── 12. Fallback: strip noise, return what's left ─────────────────────
+    cleaned = _DATE_SUFFIX.sub('', text)
+    cleaned = _AT_BRANCH.sub('', cleaned)
+    cleaned = _OF_BRANCH.sub('', cleaned)
+    cleaned = _LONG_REF.sub('', cleaned).strip()
+    cleaned = _CC_LOCATION_NOISE.sub('', cleaned).strip()
+
+    # Drop leading SBI prefix tokens
+    for prefix in _SBI_PREFIXES:
+        if cleaned.upper().startswith(prefix):
             cleaned = cleaned[len(prefix):].strip()
+            break
 
-    return cleaned.title() if cleaned else raw.strip()
+    return (cleaned or raw.strip()), "other"
 
 
-def _extract_after(text: str, markers: list, stop_at: list = None) -> str:
-    for marker in markers:
-        idx = text.upper().find(marker.upper())
-        if idx != -1:
-            after = text[idx + len(marker):].strip()
-            if stop_at:
-                for stop in stop_at:
-                    stop_idx = after.upper().find(stop.upper())
-                    if stop_idx != -1:
-                        after = after[:stop_idx].strip()
-            return after[:30].strip()
-    return ""
+_ACRONYMS = re.compile(r'\b(atm|upi|sbi|hdfc|icici|axis|emi|sip|neft|imps|ppf|fd|otp|kyc|ltd|pvt)\b', re.IGNORECASE)
+
+def _normalize(merchant: str) -> str:
+    """Title-case, collapse whitespace, restore known acronyms to uppercase."""
+    if not merchant:
+        return merchant
+    result = re.sub(r'\s+', ' ', merchant).strip().title()
+    # Restore acronyms that title() wrongly lowercased
+    result = _ACRONYMS.sub(lambda m: m.group(0).upper(), result)
+    return result

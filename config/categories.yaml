@@ -27,7 +27,7 @@ categories:
     - vegetables
     - zepto
 
-  Shopping:
+  Shopping & Apparel:
     - amazon
     - flipkart
     - myntra
@@ -36,6 +36,11 @@ categories:
     - nykaa
     - snapdeal
     - retail
+    - salon
+    - haircut
+    - parlour
+    - grooming
+    - skincare
 
   Fuel & Transport:
     - petrol
@@ -51,7 +56,7 @@ categories:
     - irctc
     - railway
 
-  Entertainment:
+  Entertainment & Subscriptions:
     - netflix
     - spotify
     - prime video
@@ -60,6 +65,11 @@ categories:
     - pvr
     - inox
     - youtube
+    - apple music
+    - zee5
+    - sonyliv
+    - jiocinema
+    - subscription
 
   Utilities & Bills:
     - electricity
@@ -136,11 +146,6 @@ categories:
     - atm
     - cash withdrawal
     - cdm
-
-  Subscriptions:
-    - subscription
-    - annual fee
-    - membership
 
   Other:
     - misc
