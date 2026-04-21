@@ -23,9 +23,18 @@ def process_statement(file_path: str, dry_run: bool = False, csv_path: str = Non
     parser, password = get_parser_and_password(file_path)
     print(f"✅ Detected: {parser.source_label}")
 
-    # 2. Parse
-    raw_txns = parser.parse(file_path, password)
+    # 2. Parse + validate (Block 1)
+    result = parser.parse(file_path, password)
+    validation = result.validation
+    raw_txns = result.transactions
+
     print(f"   Parsed {len(raw_txns)} transactions")
+
+    if not validation.is_ok():
+        print(f"\n❌ HALTED — {validation.message}")
+        print("   Fix the extraction issue or check the file format before proceeding.")
+        return {"file": file_path, "parsed": 0, "inserted": 0, "halted": True, "reason": validation.message}
+
     if not raw_txns:
         return {"file": file_path, "parsed": 0, "inserted": 0}
 
@@ -34,6 +43,8 @@ def process_statement(file_path: str, dry_run: bool = False, csv_path: str = Non
 
     # 4. Flag internal transfers
     txn_dicts = flag_internal_transfers(txn_dicts, parser.source_id)
+    _flagged = sum(1 for t in txn_dicts if t.get("is_internal_transfer"))
+    print(f"   🏷️  Tagging: {_flagged} internal transfers flagged | {len(txn_dicts) - _flagged} spendable rows")
 
     # 5. Dedup against existing DB (skip in dry-run — DB may be empty/irrelevant)
     if not dry_run:

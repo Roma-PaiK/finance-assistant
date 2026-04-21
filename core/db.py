@@ -26,6 +26,7 @@ def init_db():
             month               TEXT NOT NULL,          -- YYYY-MM
             description         TEXT NOT NULL,
             raw_description     TEXT,
+            canonical_merchant  TEXT,                   -- stable key for corrections DB
             amount              REAL NOT NULL,
             txn_type            TEXT NOT NULL,          -- debit / credit
             source_id           TEXT NOT NULL,          -- acc_sbi_salary etc.
@@ -56,6 +57,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_txn_month ON transactions(month);
         CREATE INDEX IF NOT EXISTS idx_txn_source ON transactions(source_id);
         CREATE INDEX IF NOT EXISTS idx_txn_category ON transactions(category);
+        CREATE INDEX IF NOT EXISTS idx_txn_merchant ON transactions(canonical_merchant);
     """)
     conn.commit()
     conn.close()
@@ -69,12 +71,13 @@ def insert_transactions(transactions: list[dict]) -> int:
         try:
             conn.execute("""
                 INSERT INTO transactions
-                (date, month, description, raw_description, amount, txn_type,
-                 source_id, source_label, category, is_internal_transfer,
-                 splitwise_candidate, splitwise_pushed, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (date, month, description, raw_description, canonical_merchant,
+                 amount, txn_type, source_id, source_label, category,
+                 is_internal_transfer, splitwise_candidate, splitwise_pushed, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 txn["date"], txn["month"], txn["description"], txn["raw_description"],
+                txn.get("canonical_merchant", ""),
                 txn["amount"], txn["txn_type"], txn["source_id"], txn["source_label"],
                 txn["category"], int(txn["is_internal_transfer"]),
                 int(txn["splitwise_candidate"]), int(txn["splitwise_pushed"]),
