@@ -148,4 +148,9 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
 
         txn["category"] = cat or "Other"
 
+    # Sync flag: if category resolved to Internal Transfer, mark the flag too
+    for txn in transactions:
+        if txn.get("category") == "Internal Transfer":
+            txn["is_internal_transfer"] = True
+
     return transactions
