@@ -3,6 +3,7 @@ config/passwords.yaml
 config/accounts.yaml
 data/
 data_preview/
+data_corrections/
 *.db
 dry_run_*.csv
 
