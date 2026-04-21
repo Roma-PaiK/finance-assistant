@@ -1,171 +1,300 @@
-# CLAUDE.md
+# Finance Assistant — Phase 1: Tagging Workflow
 
-Guidance for Claude Code (claude.ai/code) when working in this repo.
-
----
-
-## What This Project Is
-
-Local-first personal finance system for Indian user:
-- 4 bank accounts (SBI, Canara, HDFC, Bank of Baroda)
-- 3 credit cards (HDFC moneyback, Amazon Pay ICICI, SuperMoney Axis)
-- Monthly statement uploads (PDF, password-protected PDF, XLSX, encrypted XLSX)
-- Auto parse, clean, categorize, SQLite store
-- CLI-first, dry-run preview before DB commit
-- Planned: Streamlit UI + local LLM Q&A + Splitwise integration
-
-**All local. No data leaves machine. Zero cloud cost.**
+**Goal:** Reliable, low-effort transaction categorization across savings + credit cards. Phase 2 (budgeting, savings advice, investment insights) needs clean data.
 
 ---
 
-## Account & Card Registry
+## How to use this doc
 
-| ID | Label | Bank | Role |
-|---|---|---|---|
-| `acc_sbi_salary` | SBI Salary Account | SBI | Salary in. Source of all inter-account transfers |
-| `acc_canara_daily` | Canara Daily Account | Canara | Daily spend, rent, CC payments |
-| `acc_hdfc_emi` | HDFC EMI Account | HDFC | Education loan EMI only |
-| `acc_bob_sip` | Bank of Baroda SIP Account | BOB | SIP/investments. Joint with father |
-| `cc_hdfc_moneyback` | HDFC moneyback CC | HDFC | CC, paid from Canara |
-| `cc_amazon_icici` | Amazon Pay ICICI CC | ICICI | CC, paid from Canara |
-| `cc_supermoney_axis` | SuperMoney Axis CC | Axis | CC, paid from Canara |
+Each block has **Status**, **Role**, **What to do**, **Output**.
 
-### Internal Transfer Rules (NEVER count as spending)
-- SBI → Canara (daily expense funding)
-- SBI → HDFC (EMI funding)
-- SBI → BOB (SIP funding)
-- Detected via IMPS/NEFT/UPI patterns in raw description: `IMPS/xxx/CNRB`, `IMPS/xxx/HDFC`, `IMPS/xxx/BARB`
-- Salary credits from Bajaj Finance must NEVER be flagged as internal transfers
+After block done, update:
+- `Status:` → `✅ Done` (or `🟡 In progress`, `⬜ Not started`, `🔁 Needs revisit`)
+- `Output:` → replace with actual artifact (file path, table name, sample output, notes)
+
+Status legend:
+- ⬜ Not started
+- 🟡 In progress
+- ✅ Done
+- 🔁 Needs revisit
 
 ---
 
-## Architecture & Data Flow
+## Phase 1 "Done" Criteria
+
+Complete when all three hold on real monthly data:
+
+- [ ] >90% transactions tagged by cache/rules (no LLM call) on fresh month
+- [ ] Dry-run corrections per month under ~20 rows
+- [ ] Eval harness shows stable accuracy across two consecutive months without prompt changes
+
+---
+
+## Block 0 — Foundation: Canonical Taxonomy & Merchant Normalization
+
+**Status:** ✅ Done
+
+**Role:** Nothing downstream works if merchants aren't comparable across sources. Zomato on HDFC CC, Zomato via UPI, Zomato via Paytm must all resolve to same canonical name.
+
+**What to do:**
+- Lock final category list. Start from 9 in financeEnv. Decide:
+  - Want `Internal Transfer` as own top-level category (recommended)?
+  - Split `Other` into sub-buckets, or leave as review queue?
+- Build/extend description cleaner: any raw string (UPI/X/Y/Z, POS CHARGE, NEFT-ABC-...) returns `canonical_merchant`.
+- Handle common Indian statement noise: UPI prefixes, trip IDs, transaction ref numbers, trailing digits.
+- Spot-check cleaner against sample of each statement type before trusting.
+
+**Output:**
+
+**Canonical Category List (locked 2026-04-19):**
+| # | Category |
+|---|----------|
+| 1 | Food & Dining |
+| 2 | Grocery |
+| 3 | Transport & Commute |
+| 4 | Utilities & Bills *(electricity, water, gas, phone, internet)* |
+| 5 | Rent & Housing |
+| 6 | EMI & Loan Repayment |
+| 7 | Insurance *(health, life, car, home)* |
+| 8 | Healthcare *(doctor visits, medicine, hospital bills)* |
+| 9 | Shopping & Apparel *(clothing, electronics, personal care: haircuts, skincare, grooming)* |
+| 10 | Entertainment & Subscriptions *(movies, concerts, events, OTT, apps, memberships)* |
+| 11 | Education *(school/college fees, coaching, courses)* |
+| 12 | Travel & Vacation *(trips, flights, hotels, pilgrimages)* |
+| 13 | Gifts & Donations *(wedding gifts, charity, religious donations)* |
+| 14 | Savings & Investment *(FD, SIP, stocks, PPF, etc.)* |
+| 15 | Internal Transfer *(between own accounts)* |
+| 16 | Cash Withdrawal/Cash Expenses |
+| — | Other *(review queue — low-confidence fallback)* |
+
+Notes:
+- `Other` = NOT real category; review queue (Block 4 dry-run).
+- `Internal Transfer` covers savings↔savings + CC settlement flows (Block 5 sub-tags as `Internal Transfer — CC Settlement`).
+
+**Merchant normalization — `core/description_cleaner.py`** (done 2026-04-16):
+
+| Function | Output | Example |
+|----------|--------|---------|
+| `get_canonical_merchant(raw)` | Stable DB key | `"Zomato"`, `"Flipkart Paytm"`, `"Karkala Ro"` |
+| `clean_description(raw)` | Human display | `"UPI - Zomato"`, `"IMPS - Karkala Ro"`, `"Auto Debit - HDFC Ergo"` |
+
+Handled formats:
+- HDFC savings: `UPI-MERCHANT-VPA@PSP-BANKREF`
+- SBI/Canara savings: `UPI/DR|CR|DB/REFNUM/MERCHANT/...` and `MOB-IMPS-CR/PAYEE/BANK/...`
+- Axis CC: `UPI/MERCHANT/VPA@PSP/TXNREF`
+- ICICI/HDFC CC: plain merchant strings (fallback strip of location noise)
+- All banks: `ACH DR/CR`, `ATM WDL`, `NEFT`, `CMP` (salary), `INT.CR`
+
+`Transaction.canonical_merchant` field added to schema (populated at parse time).
+
+---
+
+## Block 1 — Ingestion & Extraction Hardening
+
+**Status:** 🟡 In progress  
+
+**Role:** Fix "PDF extraction misses rows / grabs junk" before tagging. Garbage in = garbage tagged; you'll waste hours chasing tagging bugs that are really extraction bugs.
+
+**What to do:**
+- For each statement type (each bank PDF, each Excel), add **validation step**:
+  - Count rows extracted vs. expected (use "total debit/credit count" on most Indian statements, or opening/closing balance math).
+  - Mismatch → flag file, halt. No silent pass to tagging.
+- Strip non-transaction filler (addresses, customer IDs, email headers) here, not later.
+- Tag each row with `source_account` on ingestion.
+- Standardize schema across sources: `date`, `raw_description`, `amount`, `direction (debit/credit)`, `source_account`, `bank_category` (nullable, for CCs).
+
+**Output (done 2026-04-16):**
+
+**Supported statement types + validation coverage:**
+| Bank | Format | Validation |
+|------|--------|-----------|
+| SBI | XLSX | Balance math (opening/closing from metadata) |
+| Canara | CSV / XLSX | Balance math (same metadata format as SBI) |
+| HDFC savings | XLS | warn — no balance labels in header block |
+| BOB | XLS | warn — no balance labels in header block |
+| HDFC Moneyback CC | PDF | warn — no balance math for CCs |
+| Amazon ICICI CC | PDF | warn — no balance math for CCs |
+| Axis Supermoney CC | PDF | warn — no balance math for CCs |
+
+**Validation statuses:** `pass` (delta ≤ ₹2) / `warn` (no metadata, row count > 0) / `fail` (mismatch or 0 rows → pipeline halts)
+
+**Artifacts:**
+- `parsers/validator.py` — `ParseValidation` dataclass + `validate_balance()` fn
+- `parsers/base.py` — `ParseResult` wrapper; `parse()` returns `ParseResult`; `_find_balance_metadata()` scans pre-header rows
+- `main.py` — halts on `fail`, skips categorization + DB insert
+- `core/db.py` — `canonical_merchant` column + index added to transactions table
+
+**Filler stripping:** non-date rows (totals, addresses, footnotes) skipped by date-parse guard in `_extract_transactions` — no separate strip pass needed.
+
+---
+
+## Block 2 — Corrections Database (The Cache)
+
+**Status:** ⬜ Not started
+
+**Role:** System memory. Every correction lives here. Makes system faster over time instead of re-writing same rules.
+
+**What to do:**
+- Create `corrections` table keyed on `canonical_merchant`.
+- Fields:
+  - `canonical_merchant` (primary key or unique index)
+  - `category`
+  - `confidence_count` (times mapping confirmed)
+  - `last_seen_date`
+  - `source_account_hint` (optional — only if same merchant means different things on different cards)
+  - `notes` (optional)
+- Expose two operations:
+  - `lookup(canonical_merchant)` → returns category or None
+  - `upsert(canonical_merchant, category)` → inserts or increments confidence
+- Seed: run current logic on year of savings data → export → correct in Excel → import back.
+
+**Output:**
+> _Fill in when done. Examples: table schema, path to DB file, seed size (e.g., "seeded with 487 unique merchants from 2024 savings data"), notes on surprises found during seeding._
+
+---
+
+## Block 3 — Categorization Pipeline (The Decision Tree)
+
+**Status:** ⬜ Not started
+
+**Role:** Tagging engine. Runs on every transaction. First hit wins — order matters.
+
+**What to do — in this exact order:**
+
+1. **Internal transfer / CC settlement check**
+   - Rules on amount + counterparty account + date proximity between own accounts.
+   - Uses `accounts.yaml` config for known account numbers.
+   - Matched → tag `Internal Transfer`, skip remaining steps.
+
+2. **Splitwise / contact-based check**
+   - Uses contact names list you provide.
+   - UPI counterparty = known friend → tag per contact rules (e.g., `Social — pending split`).
+
+3. **Corrections DB lookup** (Block 2)
+   - Canonical merchant match. Hit → apply category.
+
+4. **Time + amount pattern rules**
+   - Narrow cases where context > merchant string.
+   - Example: morning auto-rickshaws ₹40–150, 7–11 AM → `Transport & Commute`.
+
+5. **Bank's default CC category**
+   - NOT a decision. Passed as *hint* into LLM call below.
+
+6. **LLM call with few-shot examples**
+   - Retrieve 5–10 most similar past corrections from DB.
+   - Input to LLM: raw description, canonical merchant, amount, time, source account, bank's suggested category.
+   - Returns: `category` + `confidence`.
+
+7. **Fallback to "Other"**
+   - LLM confidence below threshold → tag `Other`, flag for dry-run review.
+
+**Every transaction gets:**
+- `category`
+- `category_source` (which of 7 paths tagged it)
+- `confidence`
+
+**Output:**
+> _Fill in when done. Examples: confidence threshold settled on, distribution of category_source values on real month (e.g., "62% corrections DB, 18% LLM, 12% internal transfer, 5% rules, 3% Other"), LLM model used._
+
+---
+
+## Block 4 — Dry-Run Review Interface
+
+**Status:** ⬜ Not started
+
+**Role:** Monthly human-in-the-loop step. Where corrections get captured and fed back into system.
+
+**What to do:**
+- Dry-run exports to Excel/CSV.
+- Sort: low-confidence + `Other` rows at top. Fix worst first.
+- Include `corrected_category` column, blank by default.
+- Re-import script after review:
+  - Reads corrected rows.
+  - Updates transaction's category in main DB.
+  - **Upserts** `canonical_merchant → category` mapping into corrections DB (Block 2).
+- **Key principle:** one correction updates both transaction AND rule for all future transactions.
+
+**Output:**
+> _Fill in when done. Examples: path to dry-run script, sample Excel template, path to re-import script, average corrections per month after system stabilizes._
+
+---
+
+## Block 5 — Cross-Source Reconciliation
+
+**Status:** ⬜ Not started
+
+**Role:** De-duplicate spend across savings + credit cards so category totals are real. Without this, every CC bill payment double-counts.
+
+**What to do:**
+- For each CC bill payment outflow on savings:
+  - Find matching CC statement total within date window (±3 days typically).
+  - Link them; mark savings-side as `Internal Transfer — CC Settlement`.
+- For each individual CC charge:
+  - Count once, on CC side only.
+- Port reconciliation logic from financeEnv Task 2 — classification taxonomy (`genuine_spend`, `cc_settlement`, `internal_transfer`, `refund`) already right.
+
+**Output:**
+> _Fill in when done. Examples: count of linked settlements over year, any unmatched CC payments (and why), path to reconciliation module._
+
+---
+
+## Block 6 — Evaluation Harness (Where financeEnv Fits)
+
+**Status:** ⬜ Not started
+
+**Role:** Answers "did my changes actually improve tagging?" with a number. Stops iteration being guesswork.
+
+**What to do:**
+- Freeze snapshot of corrected year of data → ground truth.
+- Feed into financeEnv-style task:
+  - Input: raw transactions.
+  - Expected output: your labels.
+- Every prompt change, model swap (llama3 → qwen → Haiku), or decision tree tweak → run harness → compare scores.
+- Track scores over time; catch regression if change makes things worse.
+
+**Output:**
+> _Fill in when done. Examples: baseline accuracy score, best-performing prompt/model combo, path to eval script, history of score changes per iteration._
+
+---
+
+## The Big-Picture Flow
 
 ```
-CLI (main.py)
-    │
-    ▼
-detector.py         — matches filename keywords → picks bank config from BANK_CONFIGS
-                      (credit cards checked before bank accounts to avoid hdfc_cc/hdfc_bank ambiguity)
-    │
-    ▼
-base.py SmartParser — decrypts file → extracts tables → finds header row dynamically
-                      → maps columns → repairs line breaks → emits Transaction objects
-    │
-    ▼
-deduplicator.py     — flags internal transfers (IMPS/UPI/NEFT pattern match)
-                      → removes duplicates vs existing DB
-    │
-    ▼
-categorizer.py      — cleans description (description_cleaner.py)
-                      → Step 1: SBI raw pattern rules (SBI_RAW_RULES)
-                      → Step 2: YAML keyword rules on cleaned description
-                      → Step 3: YAML keyword rules on raw description
-                      → Step 4: Ollama LLM fallback (requires Ollama running locally)
-    │
-    ├── --dry-run → timestamped CSV (no DB write)
-    └── live run  → SQLite via db.py
+Statement files (PDF/Excel)
+        │
+   [Block 1] Extract + validate rows
+        │
+   [Block 0] Clean descriptions → canonical_merchant
+        │
+   [Block 3] Categorization pipeline
+        │   ├─ internal transfer check
+        │   ├─ contact/Splitwise check
+        │   ├─ corrections DB lookup     ◄── reads from [Block 2]
+        │   ├─ time/amount rules
+        │   ├─ bank category as hint
+        │   └─ LLM + few-shot            ◄── reads from [Block 2]
+        │
+   [Block 5] Reconcile across sources
+        │
+   [Block 4] Dry-run Excel → you correct → re-import
+        │                         │
+        │                         └──► updates [Block 2] corrections DB
+        │
+   Final DB state
+        │
+   [Block 6] Eval harness measures accuracy → informs next iteration
 ```
 
 ---
 
-## CLI Commands (uv run)
+## Working Notes
 
-```bash
-# Parse + dry run (CSV preview, no DB write)
-uv run main.py <file> --dry-run
-uv run main.py <file> --dry-run --csv custom_name.csv
+> _Scratchpad for things learned as you go — prompt tweaks, weird edge cases, merchant aliases, ideas for Phase 2._
 
-# Parse + commit to DB
-uv run main.py <file>
-uv run main.py <file1> <file2> <file3>   # multiple files
-
-# Inspect DB
-uv run check_db.py
-uv run check_db.py --month 2025-01
-uv run check_db.py --category
-uv run check_db.py --category --month 2025-01
-uv run check_db.py --uncategorized
-uv run check_db.py --all
-
-# Fix categories (after editing config/categories.yaml)
-uv run recategorize.py --no-llm
-uv run recategorize.py
-uv run recategorize.py --month 2025-01 --no-llm
-
-# Clear DB
-uv run clear_db.py --force
-uv run clear_db.py --month 2025-01
-uv run clear_db.py --source acc_sbi_salary
-```
+- BOB joint account — my share = sum of my outflows to that account. Dad's contributions don't appear in my statements. 
 
 ---
 
-## File Naming Convention
+## Next Phase (placeholder)
 
-Bank name in filename required for auto-detection:
-
-| Source | Filename must contain |
-|---|---|
-| SBI | `sbi`, `statebank`, or `accountstatement` |
-| HDFC bank (EMI account) | `hdfc` but NOT `moneyback`, `cc`, `credit` |
-| HDFC moneyback CC | `hdfc` AND one of: `moneyback`, `cc`, `credit` |
-| Bank of Baroda | `bob`, `baroda` |
-| Canara | `canara` |
-| Amazon ICICI CC | `icici` or `amazon` |
-| SuperMoney Axis CC | `axis` or `supermoney` |
-
----
-
-## Transaction Data Model
-
-`Transaction` dataclass (parsers/base.py) — canonical schema:
-
-| Field | Type | Notes |
-|---|---|---|
-| `date` | `datetime.date` | Parsed from statement |
-| `month` | `str` | YYYY-MM derived from date |
-| `description` | `str` | Cleaned human-readable (set by description_cleaner) |
-| `raw_description` | `str` | Original bank text — used for internal transfer detection |
-| `amount` | `float` | Always positive |
-| `txn_type` | `str` | `"debit"` or `"credit"` |
-| `source_id` | `str` | Account ID e.g. `acc_sbi_salary` |
-| `source_label` | `str` | Human label from accounts.yaml |
-| `category` | `str` | Set by categorizer |
-| `is_internal_transfer` | `bool` | Set by deduplicator before categorizer |
-| `splitwise_candidate` | `bool` | Future Splitwise integration |
-| `notes` | `str` | Free text |
-
----
-
-## Config Files
-
-- **`config/accounts.yaml`** — account registry: `id`, `label`, `bank`, `last4`, `internal_transfers` rules
-- **`config/passwords.yaml`** — PDF/Excel passwords per bank key (`pdf_passwords` dict); gitignored
-- **`config/categories.yaml`** — keyword → category mapping; `categories` dict; first match wins
-
-Ollama model/URL hardcoded in `core/categorizer.py`: `OLLAMA_MODEL = "llama3"`, `OLLAMA_URL = "http://localhost:11434/api/generate"`. Ollama must run locally for LLM fallback; fail → silent `"Other"`.
-
----
-
-## Privacy & PII Rules for Claude Code
-
-Bank statements contain sensitive personal data. Rules, no exceptions:
-
-- **Never print, log, or display any values read from statement files** — not to terminal, not to CSV, not in debug output. No account numbers, names, amounts, descriptions, balances, IFSC codes, or any other cell values.
-- **Never suggest or run commands that print raw file contents** — no `print(row)`, no `print(df.head())`, no `print(sheet.row_values(i))`, nothing causing actual data in terminal.
-- **Need to understand file structure to fix parser?** Ask user for screenshot. Do not read or print file yourself.
-- **`config/passwords.yaml` and `config/accounts.yaml` in `.claudeignore`** — do not read. Structure documented in this CLAUDE.md.
-- **Only safe script output:** structural metadata — row count, column count, column names, empty/not-empty. Never the value itself.
-
----
-
-## Known Quirks & Gotchas
-
-- **Statement header detection:** Parser scans dynamically for first row with 2+ matches from `ALL_HEADER_KEYWORDS` (`parsers/base.py`) — skips personal info rows above transaction table.
-- **Description line breaks:** Cell values contain `\n` mid-word. Fixed with `re.sub(r'(?<!\s)\n\s*', '', raw_desc)` before word-boundary join.
-- **Column name variants:** Each statement has own column nomenclature; `base.py` maps per-bank variants via `date_cols`, `desc_cols`, `debit_cols`, `credit_cols`, `amount_cols` lists.
-- **Internal transfers:** Check `raw_description` not `description` — cleaner runs after dedup.
-- **Dedup key:** `(date, amount, txn_type, source_id)` — no description. Same-day same-amount same-source = duplicate.
-- **`recategorize.py`** re-runs description cleaning + categorization but NOT `flag_internal_transfers`. Existing `is_internal_transfer` flags preserved.
-- **SBI HTML-as-XLSX:** SBI sometimes exports HTML disguised as `.xlsx`. Parser detects `<html>` magic bytes, falls back to `pd.read_html()`.
+Phase 2 — Insights & Advice: budget planning, savings recommendations, investment suggestions. Not started until Phase 1 "Done" criteria met.
