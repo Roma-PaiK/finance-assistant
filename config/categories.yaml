@@ -142,6 +142,12 @@ categories:
     - upi transfer
     - self transfer
 
+  Internal Transfer — Self:
+    []
+
+  Internal Transfer — Other:
+    []
+
   ATM & Cash:
     - atm
     - cash withdrawal
