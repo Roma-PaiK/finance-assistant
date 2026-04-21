@@ -1,16 +1,16 @@
 # Finance Assistant — Phase 1: Tagging Workflow
 
-**Goal:** Reliable, low-effort transaction categorization across savings accounts and credit cards, so Phase 2 (budgeting, savings advice, investment insights) operates on clean data.
+**Goal:** Reliable, low-effort transaction categorization across savings + credit cards. Phase 2 (budgeting, savings advice, investment insights) needs clean data.
 
 ---
 
 ## How to use this doc
 
-Each block has a **Status**, **Role**, **What to do**, and **Output** section.
+Each block has **Status**, **Role**, **What to do**, **Output**.
 
-When you finish a block, update:
+After block done, update:
 - `Status:` → `✅ Done` (or `🟡 In progress`, `⬜ Not started`, `🔁 Needs revisit`)
-- `Output:` → replace with the actual artifact produced (file path, table name, sample output, notes on what you learned, etc.)
+- `Output:` → replace with actual artifact (file path, table name, sample output, notes)
 
 Status legend:
 - ⬜ Not started
@@ -22,10 +22,10 @@ Status legend:
 
 ## Phase 1 "Done" Criteria
 
-Phase 1 is complete when all three hold on real monthly data:
+Complete when all three hold on real monthly data:
 
-- [ ] >90% of transactions tagged by cache/rules (no LLM call) on a fresh month
-- [ ] Dry-run corrections per month are under ~20 rows
+- [ ] >90% transactions tagged by cache/rules (no LLM call) on fresh month
+- [ ] Dry-run corrections per month under ~20 rows
 - [ ] Eval harness shows stable accuracy across two consecutive months without prompt changes
 
 ---
@@ -34,15 +34,15 @@ Phase 1 is complete when all three hold on real monthly data:
 
 **Status:** ✅ Done
 
-**Role:** Nothing downstream works if merchants aren't comparable across sources. Zomato on HDFC CC, Zomato via UPI, and Zomato via Paytm must all resolve to the same canonical name.
+**Role:** Nothing downstream works if merchants aren't comparable across sources. Zomato on HDFC CC, Zomato via UPI, Zomato via Paytm must all resolve to same canonical name.
 
 **What to do:**
-- Lock down the final category list. Start from the 9 in financeEnv. Decide:
-  - Do you want `Internal Transfer` as its own top-level category (recommended)?
-  - Do you want to split `Other` into sub-buckets, or leave it as a review queue?
-- Build/extend the description cleaner so that any raw string (UPI/X/Y/Z, POS CHARGE, NEFT-ABC-...) returns a `canonical_merchant`.
-- Handle the common Indian statement noise: UPI prefixes, trip IDs, transaction reference numbers, trailing digits.
-- Spot-check the cleaner against a sample of each statement type before trusting it.
+- Lock final category list. Start from 9 in financeEnv. Decide:
+  - Want `Internal Transfer` as own top-level category (recommended)?
+  - Split `Other` into sub-buckets, or leave as review queue?
+- Build/extend description cleaner: any raw string (UPI/X/Y/Z, POS CHARGE, NEFT-ABC-...) returns `canonical_merchant`.
+- Handle common Indian statement noise: UPI prefixes, trip IDs, transaction ref numbers, trailing digits.
+- Spot-check cleaner against sample of each statement type before trusting.
 
 **Output:**
 
@@ -68,8 +68,8 @@ Phase 1 is complete when all three hold on real monthly data:
 | — | Other *(review queue — low-confidence fallback)* |
 
 Notes:
-- `Other` is NOT a real category; it's a review queue (Block 4 dry-run).
-- `Internal Transfer` covers both savings↔savings and CC settlement flows (Block 5 will sub-tag as `Internal Transfer — CC Settlement`).
+- `Other` = NOT real category; review queue (Block 4 dry-run).
+- `Internal Transfer` covers savings↔savings + CC settlement flows (Block 5 sub-tags as `Internal Transfer — CC Settlement`).
 
 **Merchant normalization — `core/description_cleaner.py`** (done 2026-04-16):
 
@@ -93,15 +93,15 @@ Handled formats:
 
 **Status:** 🟡 In progress  
 
-**Role:** Fix the "PDF extraction misses rows / grabs junk" problem before tagging. Garbage in = garbage tagged, and you'll waste hours chasing tagging bugs that are really extraction bugs.
+**Role:** Fix "PDF extraction misses rows / grabs junk" before tagging. Garbage in = garbage tagged; you'll waste hours chasing tagging bugs that are really extraction bugs.
 
 **What to do:**
-- For each statement type (each bank PDF, each Excel), add a **validation step**:
-  - Count rows extracted vs. count expected (use the "total debit count" / "total credit count" on most Indian statements, or opening/closing balance math).
-  - If counts don't match, flag the file and halt — don't silently pass to tagging.
+- For each statement type (each bank PDF, each Excel), add **validation step**:
+  - Count rows extracted vs. expected (use "total debit/credit count" on most Indian statements, or opening/closing balance math).
+  - Mismatch → flag file, halt. No silent pass to tagging.
 - Strip non-transaction filler (addresses, customer IDs, email headers) here, not later.
-- Tag each row with its `source_account` immediately on ingestion.
-- Standardize the schema across sources: `date`, `raw_description`, `amount`, `direction (debit/credit)`, `source_account`, `bank_category` (nullable, for CCs).
+- Tag each row with `source_account` on ingestion.
+- Standardize schema across sources: `date`, `raw_description`, `amount`, `direction (debit/credit)`, `source_account`, `bank_category` (nullable, for CCs).
 
 **Output (done 2026-04-16):**
 
@@ -130,26 +130,58 @@ Handled formats:
 
 ## Block 2 — Corrections Database (The Cache)
 
-**Status:** ⬜ Not started
+**Status:** ✅ Done
 
-**Role:** The memory of the system. Every correction you ever make lives here. This is what makes the system get faster over time instead of needing the same rules re-written.
+**Role:** System memory. Every correction lives here. Makes system faster over time instead of re-writing same rules.
 
-**What to do:**
-- Create a `corrections` table keyed on `canonical_merchant`.
-- Fields:
-  - `canonical_merchant` (primary key or unique index)
-  - `category`
-  - `confidence_count` (how many times this mapping has been confirmed)
-  - `last_seen_date`
-  - `source_account_hint` (optional — only if same merchant means different things on different cards)
-  - `notes` (optional)
-- Expose two operations:
-  - `lookup(canonical_merchant)` → returns category or None
-  - `upsert(canonical_merchant, category)` → inserts or increments confidence
-- Seed it by: running current logic on the year of savings data → exporting → correcting in Excel → importing back.
+**Output (done 2026-04-21):**
 
-**Output:**
-> _Fill in when done. Examples: table schema, path to DB file, seed size (e.g., "seeded with 487 unique merchants from 2024 savings data"), notes on surprises found during seeding._
+**Schema — `core/corrections_db.py`:**
+```python
+corrections (
+  canonical_merchant  TEXT PRIMARY KEY,
+  category            TEXT NOT NULL,
+  confidence_count    INTEGER DEFAULT 1,   # increments on repeat corrections
+  last_seen_date      TEXT,
+  source_account_hint TEXT,                # e.g. "cc_hdfc_moneyback" if merchant ≠ across accounts
+  notes               TEXT
+)
+```
+
+**Operations:**
+- `lookup(canonical_merchant)` → returns category or None
+- `upsert(canonical_merchant, category, source_account_hint, notes)` → inserts or increments confidence
+- `get_all()` → list of all rows sorted by confidence desc
+- `stats()` → {"total_merchants": N, "high_confidence_3plus": M}
+
+**Seeding workflow:**
+1. Generate dry-runs with `main.py --dry-run` on all statements
+2. User corrects `corrected_category` column in each dry-run CSV (add column; blank = accept current)
+3. For Internal Transfer rows: user adds `transfer_type` column (self/others/unknown)
+4. Run `import_corrections.py <csv> [...]` to preview; `--save` to commit to DB + cache
+5. Merge rule applied at import time:
+   - `Internal Transfer + self → "Internal Transfer — Self"`
+   - `Internal Transfer + others → "Internal Transfer — Other"`
+   - `Internal Transfer + unknown → "Internal Transfer"` (flagged for review)
+   - `transfer_type` column dropped after merge
+
+**Seed snapshot (2026-04-21) from all corrected dry-runs:**
+- **6 statement files corrected** (BOB, SBI, HDFC savings, HDFC CC, Amazon CC, Axis CC)
+- **398 transactions seeded into DB**
+- **61 unique merchants cached**
+- **8 merchants at high confidence (3+ occurrences)**
+- **0 rows flagged for review** (all transfer_type decisions made)
+
+**Artifacts:**
+- `core/corrections_db.py` — cache ops
+- `import_corrections.py` — CSV importer with preview + `--save` mode
+- `config/categories.yaml` — extended with `Internal Transfer — Self/Other` sub-types
+- `config/accounts.yaml` — label→source_id mapping (loaded at import time)
+
+**Key design:**
+- Single source of truth: categories from `categories.yaml`, source IDs from `accounts.yaml`
+- Transfer type merge happens at import, not display — DB stores only final merged category
+- Merchant string normalization happens in `description_cleaner.get_canonical_merchant()` at parse time
 
 ---
 
@@ -157,28 +189,28 @@ Handled formats:
 
 **Status:** ⬜ Not started
 
-**Role:** The actual tagging engine. Runs on every transaction. First hit wins — order matters.
+**Role:** Tagging engine. Runs on every transaction. First hit wins — order matters.
 
 **What to do — in this exact order:**
 
 1. **Internal transfer / CC settlement check**
-   - Rules on amount + counterparty account + date proximity between your own accounts.
-   - Uses your `accounts.yaml` config for known account numbers.
-   - If matched → tag as `Internal Transfer`, skip remaining steps.
+   - Rules on amount + counterparty account + date proximity between own accounts.
+   - Uses `accounts.yaml` config for known account numbers.
+   - Matched → tag `Internal Transfer`, skip remaining steps.
 
 2. **Splitwise / contact-based check**
-   - Uses the contact names list you'll provide.
-   - If UPI counterparty is a known friend → tag per your contact rules (e.g., `Social — pending split`).
+   - Uses contact names list you provide.
+   - UPI counterparty = known friend → tag per contact rules (e.g., `Social — pending split`).
 
 3. **Corrections DB lookup** (Block 2)
-   - Canonical merchant match. If hit → apply category.
+   - Canonical merchant match. Hit → apply category.
 
 4. **Time + amount pattern rules**
    - Narrow cases where context > merchant string.
    - Example: morning auto-rickshaws ₹40–150, 7–11 AM → `Transport & Commute`.
 
 5. **Bank's default CC category**
-   - NOT a decision. Passed as a *hint* into the LLM call below.
+   - NOT a decision. Passed as *hint* into LLM call below.
 
 6. **LLM call with few-shot examples**
    - Retrieve 5–10 most similar past corrections from DB.
@@ -186,15 +218,15 @@ Handled formats:
    - Returns: `category` + `confidence`.
 
 7. **Fallback to "Other"**
-   - If LLM confidence is below threshold → tag as `Other`, flag for dry-run review.
+   - LLM confidence below threshold → tag `Other`, flag for dry-run review.
 
 **Every transaction gets:**
 - `category`
-- `category_source` (which of the 7 paths tagged it)
+- `category_source` (which of 7 paths tagged it)
 - `confidence`
 
 **Output:**
-> _Fill in when done. Examples: confidence threshold you settled on, distribution of category_source values on a real month (e.g., "62% corrections DB, 18% LLM, 12% internal transfer, 5% rules, 3% Other"), LLM model used._
+> _Fill in when done. Examples: confidence threshold settled on, distribution of category_source values on real month (e.g., "62% corrections DB, 18% LLM, 12% internal transfer, 5% rules, 3% Other"), LLM model used._
 
 ---
 
@@ -202,20 +234,20 @@ Handled formats:
 
 **Status:** ⬜ Not started
 
-**Role:** The monthly human-in-the-loop step. Where corrections get captured and fed back into the system.
+**Role:** Monthly human-in-the-loop step. Where corrections get captured and fed back into system.
 
 **What to do:**
 - Dry-run exports to Excel/CSV.
-- Sort order: low-confidence and `Other` rows at the top. Fix worst first.
-- Include a `corrected_category` column, blank by default.
-- After review, the re-import script:
+- Sort: low-confidence + `Other` rows at top. Fix worst first.
+- Include `corrected_category` column, blank by default.
+- Re-import script after review:
   - Reads corrected rows.
-  - Updates the transaction's category in the main DB.
-  - **Upserts** the `canonical_merchant → category` mapping into the corrections DB (Block 2).
-- **Key principle:** one correction updates both the transaction AND the rule for all future transactions.
+  - Updates transaction's category in main DB.
+  - **Upserts** `canonical_merchant → category` mapping into corrections DB (Block 2).
+- **Key principle:** one correction updates both transaction AND rule for all future transactions.
 
 **Output:**
-> _Fill in when done. Examples: path to dry-run script, sample Excel template, path to re-import script, average corrections per month after the system stabilizes._
+> _Fill in when done. Examples: path to dry-run script, sample Excel template, path to re-import script, average corrections per month after system stabilizes._
 
 ---
 
@@ -223,18 +255,18 @@ Handled formats:
 
 **Status:** ⬜ Not started
 
-**Role:** De-duplicate spend across savings and credit cards so category totals are real. Without this, every CC bill payment gets double-counted.
+**Role:** De-duplicate spend across savings + credit cards so category totals are real. Without this, every CC bill payment double-counts.
 
 **What to do:**
 - For each CC bill payment outflow on savings:
-  - Find matching CC statement total within a date window (±3 days typically).
+  - Find matching CC statement total within date window (±3 days typically).
   - Link them; mark savings-side as `Internal Transfer — CC Settlement`.
 - For each individual CC charge:
-  - Ensure it's counted once, on the CC side only.
-- Port the reconciliation logic from financeEnv Task 2 — the classification taxonomy (`genuine_spend`, `cc_settlement`, `internal_transfer`, `refund`) is already right.
+  - Count once, on CC side only.
+- Port reconciliation logic from financeEnv Task 2 — classification taxonomy (`genuine_spend`, `cc_settlement`, `internal_transfer`, `refund`) already right.
 
 **Output:**
-> _Fill in when done. Examples: count of linked settlements over the year, any unmatched CC payments (and why), path to reconciliation module._
+> _Fill in when done. Examples: count of linked settlements over year, any unmatched CC payments (and why), path to reconciliation module._
 
 ---
 
@@ -242,15 +274,15 @@ Handled formats:
 
 **Status:** ⬜ Not started
 
-**Role:** Answers "did my changes actually improve tagging?" with a number, so iteration stops being guesswork.
+**Role:** Answers "did my changes actually improve tagging?" with a number. Stops iteration being guesswork.
 
 **What to do:**
-- Freeze a snapshot of your corrected year of data → this is ground truth.
-- Feed it into a financeEnv-style task:
+- Freeze snapshot of corrected year of data → ground truth.
+- Feed into financeEnv-style task:
   - Input: raw transactions.
   - Expected output: your labels.
-- Every time you change a prompt, swap a model (llama3 → qwen → Haiku), or tweak the decision tree → run the harness → compare scores.
-- Track scores over time so you see regression if a change makes things worse.
+- Every prompt change, model swap (llama3 → qwen → Haiku), or decision tree tweak → run harness → compare scores.
+- Track scores over time; catch regression if change makes things worse.
 
 **Output:**
 > _Fill in when done. Examples: baseline accuracy score, best-performing prompt/model combo, path to eval script, history of score changes per iteration._
@@ -289,7 +321,7 @@ Statement files (PDF/Excel)
 
 ## Working Notes
 
-> _Scratchpad for things you learn as you go — prompt tweaks, weird edge cases, merchant aliases, ideas for Phase 2._
+> _Scratchpad for things learned as you go — prompt tweaks, weird edge cases, merchant aliases, ideas for Phase 2._
 
 - BOB joint account — my share = sum of my outflows to that account. Dad's contributions don't appear in my statements. 
 
@@ -297,4 +329,4 @@ Statement files (PDF/Excel)
 
 ## Next Phase (placeholder)
 
-Phase 2 — Insights & Advice: budget planning, savings recommendations, investment suggestions. Not to be started until Phase 1 "Done" criteria are met.
+Phase 2 — Insights & Advice: budget planning, savings recommendations, investment suggestions. Not started until Phase 1 "Done" criteria met.
