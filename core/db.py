@@ -18,6 +18,8 @@ def get_connection():
 
 
 def init_db():
+    from core.corrections_db import init_corrections_table
+    init_corrections_table()
     conn = get_connection()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS transactions (
