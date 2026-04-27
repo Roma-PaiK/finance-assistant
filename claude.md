@@ -312,9 +312,28 @@ Statement files (PDF/Excel)
 > _Scratchpad for things learned as you go — prompt tweaks, weird edge cases, merchant aliases, ideas for Phase 2._
 
 - BOB joint account — my share = sum of my outflows to that account. Dad's contributions don't appear in my statements.
+- BBPS = payment rail not merchant. Tag as Utilities & Bills by default. Sub-biller detail not available from bank statements — enrich from biller apps in Phase 2 if needed. On savings account side, large BBPS amounts near CC due date = CC settlement.
+- NEFT/IMPS keyword too broad for internal transfer detection — needs contact check first. Known contacts: dad (suresh pai variants), self (roma pa variants). BOB joint account = Savings & Investment, not family transfer."
 
 ---
 
 ## Next Phase (placeholder)
 
 Phase 2 — Insights & Advice: budget planning, savings recommendations, investment suggestions. Not started until Phase 1 "Done" criteria met.
+
+## Phase 3 (Future — multi-agent advisory system)
+
+**Status:** ⬜ Not started
+
+**Role:** Once Phase 1 & 2 are stable, build specialized agents for different financial tasks:
+- Categorization Agent (debate-based)
+- Reconciliation Agent
+- Budget Planning Agent
+- Tax Optimization Agent
+- Investment Advisor Agent
+- Coordinator (orchestrates, synthesizes)
+
+**Why later, not now:** Multi-agent adds complexity. Value shows up when you have enough data (12+ months clean history) and independent problems to solve. Phase 1-2 is better as a clean pipeline.
+
+**Output:**
+> _To be filled in later._
