@@ -46,30 +46,30 @@ Complete when all three hold on real monthly data:
 
 **Output:**
 
-**Canonical Category List (locked 2026-04-19):**
+**Canonical Category List (locked 2026-04-25, source of truth: `config/categories.yaml`):**
 | # | Category |
 |---|----------|
 | 1 | Food & Dining |
-| 2 | Grocery |
-| 3 | Transport & Commute |
-| 4 | Utilities & Bills *(electricity, water, gas, phone, internet)* |
-| 5 | Rent & Housing |
-| 6 | EMI & Loan Repayment |
-| 7 | Insurance *(health, life, car, home)* |
-| 8 | Healthcare *(doctor visits, medicine, hospital bills)* |
-| 9 | Shopping & Apparel *(clothing, electronics, personal care: haircuts, skincare, grooming)* |
-| 10 | Entertainment & Subscriptions *(movies, concerts, events, OTT, apps, memberships)* |
-| 11 | Education *(school/college fees, coaching, courses)* |
-| 12 | Travel & Vacation *(trips, flights, hotels, pilgrimages)* |
-| 13 | Gifts & Donations *(wedding gifts, charity, religious donations)* |
-| 14 | Savings & Investment *(FD, SIP, stocks, PPF, etc.)* |
-| 15 | Internal Transfer *(between own accounts)* |
-| 16 | Cash Withdrawal/Cash Expenses |
+| 2 | Groceries |
+| 3 | Fuel & Transport |
+| 4 | Utilities & Bills |
+| 5 | Rent |
+| 6 | EMI & Loan |
+| 7 | Health & Medical |
+| 8 | Shopping & Apparel |
+| 9 | Entertainment & Subscriptions |
+| 10 | Education |
+| 11 | Investment & SIP |
+| 12 | Credit Card Payment |
+| 13 | Internal Transfer |
+| 14 | Internal Transfer — Self |
+| 15 | Internal Transfer — Other |
+| 16 | ATM & Cash |
 | — | Other *(review queue — low-confidence fallback)* |
 
 Notes:
 - `Other` = NOT real category; review queue (Block 4 dry-run).
-- `Internal Transfer` covers savings↔savings + CC settlement flows (Block 5 sub-tags as `Internal Transfer — CC Settlement`).
+- `Internal Transfer — Self/Other` sub-types set at import time via `transfer_type` column in dry-run CSV.
 
 **Merchant normalization — `core/description_cleaner.py`** (done 2026-04-16):
 
@@ -187,46 +187,42 @@ corrections (
 
 ## Block 3 — Categorization Pipeline (The Decision Tree)
 
-**Status:** ⬜ Not started
+**Status:** ✅ Done
 
 **Role:** Tagging engine. Runs on every transaction. First hit wins — order matters.
 
-**What to do — in this exact order:**
+**Implemented decision tree (in order):**
 
-1. **Internal transfer / CC settlement check**
-   - Rules on amount + counterparty account + date proximity between own accounts.
-   - Uses `accounts.yaml` config for known account numbers.
-   - Matched → tag `Internal Transfer`, skip remaining steps.
+1. **`is_internal_transfer` flag** — set by deduplicator pre-categorization → `Internal Transfer`, confidence 1.0
+2. **Corrections DB lookup** — `canonical_merchant` match → apply cached category, confidence 0.80–0.95 (scales with `confidence_count`)
+3. **SBI raw pattern rules** — regex on raw description (ACH DR, IMPS bank codes, ATM WDL, etc.) → confidence 0.90
+4. **YAML keyword rules** — `categories.yaml` keywords vs cleaned + raw description → confidence 0.80
+5. **LLM fallback** — Ollama (`llama3`), prompted with canonical category list from yaml, returns `{category, confidence}` JSON
+6. **"Other" fallback** — LLM returns Other or fails → `category_source: fallback`, confidence 0.0
 
-2. **Splitwise / contact-based check**
-   - Uses contact names list you provide.
-   - UPI counterparty = known friend → tag per contact rules (e.g., `Social — pending split`).
+**Every transaction gets:** `category`, `category_source`, `confidence`
 
-3. **Corrections DB lookup** (Block 2)
-   - Canonical merchant match. Hit → apply category.
+**Output (done 2026-04-27):**
 
-4. **Time + amount pattern rules**
-   - Narrow cases where context > merchant string.
-   - Example: morning auto-rickshaws ₹40–150, 7–11 AM → `Transport & Commute`.
+**Artifacts:**
+- `core/categorizer.py` — full decision tree implementation
+- `core/db.py` — `category_source TEXT` + `confidence REAL` columns added (with migration for existing DBs)
+- `main.py` — dry-run CSV includes `category_source` + `confidence`; terminal prints source % breakdown
 
-5. **Bank's default CC category**
-   - NOT a decision. Passed as *hint* into LLM call below.
+**category_source distribution across all statements (post Canara seeding):**
+| Source | Example statements |
+|--------|-------------------|
+| `internal_transfer_flag` | SBI: 62% of rows |
+| `corrections_db` | BOB: 98% / ICICI CC: 60% / Canara: 50% / HDFC: 38% |
+| `raw_rules` | SBI spendable: 47% |
+| `yaml_rules` | ICICI CC: 40% / Canara: 12% |
+| `fallback` (Other) | Canara: 37% — mostly UPI person payments, one-off vendors |
 
-6. **LLM call with few-shot examples**
-   - Retrieve 5–10 most similar past corrections from DB.
-   - Input to LLM: raw description, canonical merchant, amount, time, source account, bank's suggested category.
-   - Returns: `category` + `confidence`.
-
-7. **Fallback to "Other"**
-   - LLM confidence below threshold → tag `Other`, flag for dry-run review.
-
-**Every transaction gets:**
-- `category`
-- `category_source` (which of 7 paths tagged it)
-- `confidence`
-
-**Output:**
-> _Fill in when done. Examples: confidence threshold settled on, distribution of category_source values on real month (e.g., "62% corrections DB, 18% LLM, 12% internal transfer, 5% rules, 3% Other"), LLM model used._
+**Known gaps (not blocking):**
+- Splitwise / contact-based check: not implemented (no contacts list yet)
+- Time + amount pattern rules: not implemented (low ROI vs corrections DB)
+- Bank CC category hint: not passed to LLM (minimal signal given corrections DB coverage)
+- Canara internal transfers: 0 flagged — Canara↔SBI/CC flows need Block 5 reconciliation
 
 ---
 

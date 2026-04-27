@@ -44,30 +44,30 @@ Complete when all three hold on real monthly data:
 
 **Output:**
 
-**Canonical Category List (locked 2026-04-19):**
+**Canonical Category List (locked 2026-04-25, source of truth: `config/categories.yaml`):**
 | # | Category |
 |---|----------|
 | 1 | Food & Dining |
-| 2 | Grocery |
-| 3 | Transport & Commute |
-| 4 | Utilities & Bills *(electricity, water, gas, phone, internet)* |
-| 5 | Rent & Housing |
-| 6 | EMI & Loan Repayment |
-| 7 | Insurance *(health, life, car, home)* |
-| 8 | Healthcare *(doctor visits, medicine, hospital bills)* |
-| 9 | Shopping & Apparel *(clothing, electronics, personal care: haircuts, skincare, grooming)* |
-| 10 | Entertainment & Subscriptions *(movies, concerts, events, OTT, apps, memberships)* |
-| 11 | Education *(school/college fees, coaching, courses)* |
-| 12 | Travel & Vacation *(trips, flights, hotels, pilgrimages)* |
-| 13 | Gifts & Donations *(wedding gifts, charity, religious donations)* |
-| 14 | Savings & Investment *(FD, SIP, stocks, PPF, etc.)* |
-| 15 | Internal Transfer *(between own accounts)* |
-| 16 | Cash Withdrawal/Cash Expenses |
+| 2 | Groceries |
+| 3 | Fuel & Transport |
+| 4 | Utilities & Bills |
+| 5 | Rent |
+| 6 | EMI & Loan |
+| 7 | Health & Medical |
+| 8 | Shopping & Apparel |
+| 9 | Entertainment & Subscriptions |
+| 10 | Education |
+| 11 | Investment & SIP |
+| 12 | Credit Card Payment |
+| 13 | Internal Transfer |
+| 14 | Internal Transfer — Self |
+| 15 | Internal Transfer — Other |
+| 16 | ATM & Cash |
 | — | Other *(review queue — low-confidence fallback)* |
 
 Notes:
 - `Other` = NOT real category; review queue (Block 4 dry-run).
-- `Internal Transfer` covers savings↔savings + CC settlement flows (Block 5 sub-tags as `Internal Transfer — CC Settlement`).
+- `Internal Transfer — Self/Other` sub-types set at import time via `transfer_type` column in dry-run CSV.
 
 **Merchant normalization — `core/description_cleaner.py`** (done 2026-04-16):
 
