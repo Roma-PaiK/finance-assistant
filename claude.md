@@ -22,7 +22,7 @@ Status legend:
 
 ## Phase 1 "Done" Criteria
 
-Complete when all three hold on real monthly data:
+All three must hold on real monthly data:
 
 - [ ] >90% transactions tagged by cache/rules (no LLM call) on fresh month
 - [ ] Dry-run corrections per month under ~20 rows
@@ -67,7 +67,7 @@ Complete when all three hold on real monthly data:
 
 Notes:
 - `Other` = NOT real category; review queue (Block 4 dry-run).
-- `Internal Transfer — Self/Other` sub-types set at import time via `transfer_type` column in dry-run CSV.
+- `Internal Transfer — Self/Other` sub-types set at import via `transfer_type` column in dry-run CSV.
 
 **Merchant normalization — `core/description_cleaner.py`** (done 2026-04-16):
 
@@ -89,12 +89,12 @@ Handled formats:
 
 ## Block 1 — Ingestion & Extraction Hardening
 
-**Status:** 🟡 In progress  
+**Status:** ✅ Done
 
-**Role:** Fix PDF extraction (misses rows/junk) before tagging. Garbage in = garbage tagged; hours wasted on extraction bugs masquerading as tagging bugs.
+**Role:** Fix PDF extraction before tagging. Garbage in = garbage tagged; extraction bugs masquerade as tagging bugs.
 
 **What to do:**
-- Add validation step per statement type: count extracted rows vs. expected (debit/credit totals or balance math). Mismatch → flag + halt; no silent pass.
+- Add validation per statement type: count extracted rows vs. expected (debit/credit totals or balance math). Mismatch → flag + halt; no silent pass.
 - Strip filler (addresses, IDs, headers) now.
 - Tag each row `source_account` on ingest.
 - Standardize schema: `date`, `raw_description`, `amount`, `direction (debit/credit)`, `source_account`, `bank_category` (nullable, for CCs).
@@ -128,7 +128,7 @@ Handled formats:
 
 **Status:** ✅ Done
 
-**Role:** System memory. Every correction lives here. Faster over time vs. re-writing same rules.
+**Role:** System memory. Every correction lives here. Gets faster over time vs. re-writing same rules.
 
 **Output (done 2026-04-21):**
 
@@ -176,14 +176,14 @@ corrections (
 
 **Key design:**
 - Single source of truth: categories from `categories.yaml`, source IDs from `accounts.yaml`
-- Transfer type merge happens at import, not display — DB stores only final merged category
-- Merchant string normalization happens in `description_cleaner.get_canonical_merchant()` at parse time
+- Transfer type merge at import, not display — DB stores only final merged category
+- Merchant normalization in `description_cleaner.get_canonical_merchant()` at parse time
 
 ---
 
 ## Block 3 — Categorization Pipeline (The Decision Tree)
 
-**Status:** 🟡 In progress
+**Status:** ✅ Done
 
 **Role:** Tagging engine. Runs on every transaction. First hit wins — order matters.
 
@@ -251,7 +251,7 @@ corrections (
 **Role:** De-duplicate spend across savings + CCs so totals are real. No CC bill payment double-count.
 
 **What to do:**
-- For each CC bill payment outflow on savings: find matching CC statement total (±3 days). Link + mark savings-side as `Internal Transfer — CC Settlement`.
+- Per CC bill payment outflow on savings: find matching CC statement total (±3 days). Link + mark savings-side as `Internal Transfer — CC Settlement`.
 - Count each CC charge once, CC-side only.
 - Port reconciliation from financeEnv Task 2; classification taxonomy (`genuine_spend`, `cc_settlement`, `internal_transfer`, `refund`) already correct.
 
@@ -268,7 +268,7 @@ corrections (
 
 **What to do:**
 - Freeze snapshot of corrected year → ground truth.
-- Feed to financeEnv-style task: input raw transactions, output your labels.
+- Feed to financeEnv-style task: input raw transactions, output labels.
 - Run harness on prompt change, model swap, or decision tree tweak → compare scores.
 - Track scores over time; catch regression.
 
@@ -311,7 +311,7 @@ Statement files (PDF/Excel)
 
 > _Scratchpad for things learned as you go — prompt tweaks, weird edge cases, merchant aliases, ideas for Phase 2._
 
-- BOB joint account — my share = sum of my outflows to that account. Dad's contributions don't appear in my statements. 
+- BOB joint account — my share = sum of my outflows to that account. Dad's contributions don't appear in my statements.
 
 ---
 

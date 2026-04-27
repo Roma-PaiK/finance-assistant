@@ -91,7 +91,7 @@ Handled formats:
 
 ## Block 1 — Ingestion & Extraction Hardening
 
-**Status:** 🟡 In progress  
+**Status:** ✅ Done
 
 **Role:** Fix "PDF extraction misses rows / grabs junk" before tagging. Garbage in = garbage tagged; you'll waste hours chasing tagging bugs that are really extraction bugs.
 
