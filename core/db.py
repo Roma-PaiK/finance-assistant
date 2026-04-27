@@ -34,6 +34,8 @@ def init_db():
             source_id           TEXT NOT NULL,          -- acc_sbi_salary etc.
             source_label        TEXT NOT NULL,
             category            TEXT,
+            category_source     TEXT,                   -- which pipeline step tagged it
+            confidence          REAL DEFAULT 0,         -- 0.0-1.0
             is_internal_transfer INTEGER DEFAULT 0,
             splitwise_candidate  INTEGER DEFAULT 0,
             splitwise_pushed     INTEGER DEFAULT 0,
@@ -61,6 +63,16 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_txn_category ON transactions(category);
         CREATE INDEX IF NOT EXISTS idx_txn_merchant ON transactions(canonical_merchant);
     """)
+    # Migration: add columns for existing DBs that predate Block 3
+    for col, ddl in [
+        ("category_source", "TEXT"),
+        ("confidence",       "REAL DEFAULT 0"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {ddl}")
+            conn.commit()
+        except Exception:
+            pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -75,13 +87,15 @@ def insert_transactions(transactions: list[dict]) -> int:
                 INSERT INTO transactions
                 (date, month, description, raw_description, canonical_merchant,
                  amount, txn_type, source_id, source_label, category,
+                 category_source, confidence,
                  is_internal_transfer, splitwise_candidate, splitwise_pushed, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 txn["date"], txn["month"], txn["description"], txn["raw_description"],
                 txn.get("canonical_merchant", ""),
                 txn["amount"], txn["txn_type"], txn["source_id"], txn["source_label"],
-                txn["category"], int(txn["is_internal_transfer"]),
+                txn["category"], txn.get("category_source"), txn.get("confidence", 0.0),
+                int(txn["is_internal_transfer"]),
                 int(txn["splitwise_candidate"]), int(txn["splitwise_pushed"]),
                 txn.get("notes", "")
             ))

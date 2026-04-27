@@ -1,16 +1,24 @@
 """
-Two-tier categorization:
-1. Rule engine — keyword matching from categories.yaml (fast, free)
-2. Ollama LLM fallback — for unknowns (local, free)
+Block 3 — Categorization Pipeline (Decision Tree)
 
-Also cleans raw descriptions before categorizing.
+Order (first hit wins):
+1. is_internal_transfer flag
+2. Corrections DB lookup (canonical_merchant)
+3. SBI raw pattern rules
+4. YAML keyword rules (cleaned desc, then raw)
+5. LLM fallback (Ollama)
+6. "Other" fallback
+
+Every txn gets: category, category_source, confidence
 """
 
 import re
 import yaml
 import os
+import json
 import requests
 from core.description_cleaner import clean_description
+import core.corrections_db as corrections_db
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "categories.yaml")
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -23,132 +31,152 @@ def load_rules() -> dict[str, list[str]]:
     return cfg.get("categories", {})
 
 
-# Hard-coded high-confidence rules for SBI raw description patterns
-# These run BEFORE the yaml rules, on the RAW description
+# SBI raw description pattern rules — match on raw string before cleaning
 SBI_RAW_RULES = [
-    # Internal transfers — belt-and-suspenders with deduplicator
-    (r"imps/\d+/cnrb",              "Internal Transfer"),
-    (r"imps/\d+/hdfc",              "Internal Transfer"),
-    (r"imps/\d+/barb",              "Internal Transfer"),
-    (r"upi/dr/.+/cnrb",             "Internal Transfer"),
-    (r"upi/dr/.+/hdfc",             "Internal Transfer"),
-    (r"neft.+(canara|cnrb)",        "Internal Transfer"),
-
-    # Salary
-    (r"bajaj finance",              "Salary"),
-    (r"cmp\s+\w.+\s+ltd",          "Salary"),
-
-    # Interest
-    (r"int\.cr|savings bank interest|int cr", "Interest"),
-
-    # ATM
-    (r"atm\s*wdl|atm/",            "ATM & Cash"),
-
-    # Auto debits — SIP/EMI typically come as ACH DR
-    (r"ach\s+dr.+sip",             "Investment & SIP"),
-    (r"ach\s+dr.+mutual",          "Investment & SIP"),
-    (r"ach\s+dr.+loan",            "EMI & Loan"),
-    (r"ach\s+dr.+finance",         "EMI & Loan"),
-
-    # UPI spends (not to own accounts) — let YAML rules handle merchant name
-    # These are catch-alls only
-    (r"upi/dr/.+/paytm",           "Utilities & Bills"),
-    (r"upi/dr/.+/swiggy",          "Food & Dining"),
-    (r"upi/dr/.+/zomato",          "Food & Dining"),
+    (r"imps/\d+/cnrb",                        "Internal Transfer"),
+    (r"imps/\d+/hdfc",                         "Internal Transfer"),
+    (r"imps/\d+/barb",                         "Internal Transfer"),
+    (r"upi/dr/.+/cnrb",                        "Internal Transfer"),
+    (r"upi/dr/.+/hdfc",                        "Internal Transfer"),
+    (r"neft.+(canara|cnrb)",                   "Internal Transfer"),
+    (r"bajaj finance",                         "Salary"),
+    (r"cmp\s+\w.+\s+ltd",                     "Salary"),
+    (r"int\.cr|savings bank interest|int cr",  "Interest"),
+    (r"atm\s*wdl|atm/",                       "ATM & Cash"),
+    (r"ach\s+dr.+sip",                        "Investment & SIP"),
+    (r"ach\s+dr.+mutual",                     "Investment & SIP"),
+    (r"ach\s+dr.+loan",                       "EMI & Loan"),
+    (r"ach\s+dr.+finance",                    "EMI & Loan"),
+    (r"upi/dr/.+/paytm",                      "Utilities & Bills"),
+    (r"upi/dr/.+/swiggy",                     "Food & Dining"),
+    (r"upi/dr/.+/zomato",                     "Food & Dining"),
 ]
 
 
-def categorize_by_raw_rules(raw_description: str) -> str | None:
-    """Match against raw SBI description patterns first."""
-    raw_lower = raw_description.lower()
+def _corrections_lookup(canonical_merchant: str) -> tuple[str | None, float]:
+    """Returns (category, confidence). Confidence scales with correction count."""
+    if not canonical_merchant:
+        return None, 0.0
+    cat = corrections_db.lookup(canonical_merchant)
+    if not cat:
+        return None, 0.0
+    # Get confidence_count for this merchant to scale confidence
+    for row in corrections_db.get_all():
+        if row["canonical_merchant"] == canonical_merchant:
+            count = row.get("confidence_count", 1)
+            conf = 0.95 if count >= 3 else (0.85 if count >= 2 else 0.80)
+            return cat, conf
+    return cat, 0.80
+
+
+def _raw_rules_match(raw: str) -> str | None:
+    raw_lower = raw.lower()
     for pattern, category in SBI_RAW_RULES:
         if re.search(pattern, raw_lower):
             return category
     return None
 
 
-def categorize_by_rules(description: str, rules: dict) -> str | None:
-    """Match cleaned description against categories.yaml keywords."""
-    desc_lower = description.lower()
+def _yaml_rules_match(text: str, rules: dict) -> str | None:
+    text_lower = text.lower()
     for category, keywords in rules.items():
+        if not keywords:
+            continue
         for kw in keywords:
-            if kw.lower() in desc_lower:
+            if kw.lower() in text_lower:
                 return category
     return None
 
 
-def categorize_by_llm(description: str, raw: str = "") -> str:
-    """Ask local Ollama to categorize. Uses cleaned description + raw as context."""
+def _llm_categorize(description: str, raw: str, valid_categories: set[str]) -> tuple[str, float]:
+    cats_list = "\n".join(f"- {c}" for c in sorted(valid_categories))
     prompt = f"""You are a personal finance categorizer for an Indian user.
-Categorize this bank transaction into ONE of these categories:
-Food & Dining, Groceries, Shopping, Fuel & Transport, Entertainment,
-Utilities & Bills, Health & Medical, Education, EMI & Loan,
-Investment & SIP, Rent, Salary, Interest, Credit Card Payment,
-Internal Transfer, ATM & Cash, Subscriptions, Other.
+Categorize this bank transaction into EXACTLY ONE of these categories:
+{cats_list}
 
-Transaction description: "{description}"
+Transaction: "{description}"
 Raw bank text: "{raw}"
 
-Reply with ONLY the category name, nothing else."""
+Reply with JSON only: {{"category": "<category>", "confidence": <0.0-1.0>}}
+Use "Other" if genuinely unsure. No explanation, no extra text."""
 
     try:
         resp = requests.post(OLLAMA_URL, json={
             "model": OLLAMA_MODEL,
             "prompt": prompt,
-            "stream": False
+            "stream": False,
         }, timeout=15)
-        result = resp.json().get("response", "").strip()
-        # Validate it's one of our known categories
-        return result if result else "Other"
+        text = resp.json().get("response", "").strip()
+        match = re.search(r'\{.*?\}', text, re.DOTALL)
+        if match:
+            data = json.loads(match.group())
+            cat = data.get("category", "Other")
+            conf = float(data.get("confidence", 0.6))
+            if cat not in valid_categories:
+                return "Other", 0.0
+            return cat, conf
     except Exception:
-        return "Other"
+        pass
+    return "Other", 0.0
 
 
 def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> list[dict]:
-    """
-    Full categorization pipeline per transaction:
-    1. Already flagged as internal transfer → done
-    2. Raw description → SBI pattern rules
-    3. Cleaned description → YAML keyword rules
-    4. Ollama LLM fallback
-    Also cleans the description in place.
-    """
     rules = load_rules()
+    valid_cats = set(rules.keys())
+    corrections_db.init_corrections_table()
 
     for txn in transactions:
         raw = txn.get("raw_description", "") or txn.get("description", "")
-
-        # Clean the description and store it back
         cleaned = clean_description(raw)
         txn["description"] = cleaned
+        canonical = txn.get("canonical_merchant", "")
 
-        # Already marked internal transfer
+        # Step 1: internal transfer flag (set by deduplicator)
         if txn.get("is_internal_transfer"):
             txn["category"] = "Internal Transfer"
+            txn["category_source"] = "internal_transfer_flag"
+            txn["confidence"] = 1.0
             continue
 
-        # Already has a category
-        if txn.get("category") and txn["category"] != "Other":
+        # Step 2: corrections DB — canonical merchant match
+        cat, conf = _corrections_lookup(canonical)
+        if cat:
+            txn["category"] = cat
+            txn["category_source"] = "corrections_db"
+            txn["confidence"] = conf
             continue
 
-        # Tier 1a: raw SBI pattern rules
-        cat = categorize_by_raw_rules(raw)
+        # Step 3: SBI raw pattern rules
+        cat = _raw_rules_match(raw)
+        if cat:
+            txn["category"] = cat
+            txn["category_source"] = "raw_rules"
+            txn["confidence"] = 0.9
+            continue
 
-        # Tier 1b: cleaned description vs yaml rules
-        if not cat:
-            cat = categorize_by_rules(cleaned, rules)
+        # Step 4: YAML keyword rules (try cleaned desc first, then raw)
+        cat = _yaml_rules_match(cleaned, rules) or _yaml_rules_match(raw, rules)
+        if cat:
+            txn["category"] = cat
+            txn["category_source"] = "yaml_rules"
+            txn["confidence"] = 0.8
+            continue
 
-        # Tier 1c: also try raw vs yaml rules (catches merchant names in raw)
-        if not cat:
-            cat = categorize_by_rules(raw, rules)
+        # Step 5: LLM fallback
+        if use_llm:
+            cat, conf = _llm_categorize(cleaned, raw, valid_cats)
+            if cat != "Other":
+                txn["category"] = cat
+                txn["category_source"] = "llm"
+                txn["confidence"] = conf
+                continue
 
-        # Tier 2: LLM fallback
-        if not cat and use_llm:
-            cat = categorize_by_llm(cleaned, raw)
+        # Step 6: Other fallback
+        txn["category"] = "Other"
+        txn["category_source"] = "fallback"
+        txn["confidence"] = 0.0
 
-        txn["category"] = cat or "Other"
-
-    # Sync flag: if category resolved to Internal Transfer, mark the flag too
+    # Sync is_internal_transfer flag post-categorization
     for txn in transactions:
         if txn.get("category") == "Internal Transfer":
             txn["is_internal_transfer"] = True

@@ -68,6 +68,7 @@ def process_statement(file_path: str, dry_run: bool = False, csv_path: str = Non
  
         # Reorder columns for readability
         cols = ["date", "month", "txn_type", "amount", "category",
+                "category_source", "confidence",
                 "is_internal_transfer", "description", "raw_description",
                 "canonical_merchant", "source_id", "source_label", "notes"]
         df = df[[c for c in cols if c in df.columns]]
@@ -90,16 +91,21 @@ def process_statement(file_path: str, dry_run: bool = False, csv_path: str = Non
 
 def _print_category_summary(txn_dicts: list[dict]):
     from collections import Counter
-    cats = Counter(
-        t["category"] for t in txn_dicts
-        if not t.get("is_internal_transfer")
-    )
-    internal = sum(1 for t in txn_dicts if t.get("is_internal_transfer"))
+    spendable = [t for t in txn_dicts if not t.get("is_internal_transfer")]
+    cats = Counter(t["category"] for t in spendable)
+    sources = Counter(t.get("category_source", "unknown") for t in spendable)
+    internal = len(txn_dicts) - len(spendable)
+
     print(f"\n   Category breakdown:")
     for cat, count in sorted(cats.items(), key=lambda x: -x[1]):
         print(f"     {cat:<30} {count:>4}")
     if internal:
         print(f"     {'Internal Transfer (excluded)':<30} {internal:>4}")
+
+    print(f"\n   Source breakdown:")
+    for src, count in sorted(sources.items(), key=lambda x: -x[1]):
+        pct = count / len(spendable) * 100 if spendable else 0
+        print(f"     {src:<28} {count:>4}  ({pct:.0f}%)")
 
 
 if __name__ == "__main__":
