@@ -62,6 +62,20 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_txn_source ON transactions(source_id);
         CREATE INDEX IF NOT EXISTS idx_txn_category ON transactions(category);
         CREATE INDEX IF NOT EXISTS idx_txn_merchant ON transactions(canonical_merchant);
+
+        CREATE TABLE IF NOT EXISTS reconciliation_links (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            savings_txn_id  INTEGER NOT NULL UNIQUE,
+            cc_source_id    TEXT NOT NULL,
+            cc_month        TEXT NOT NULL,
+            cc_total        REAL NOT NULL,
+            savings_amount  REAL NOT NULL,
+            delta           REAL NOT NULL,
+            confidence      TEXT NOT NULL,
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_recon_savings ON reconciliation_links(savings_txn_id);
+        CREATE INDEX IF NOT EXISTS idx_recon_cc ON reconciliation_links(cc_source_id, cc_month);
     """)
     # Migration: add columns for existing DBs that predate Block 3
     for col, ddl in [
