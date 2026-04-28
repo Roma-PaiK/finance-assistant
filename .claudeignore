@@ -8,12 +8,14 @@ data/
 *.xlsx
 *.xls
 *.csv
+contacts/
 
 # Database
 *.db
 
 # Dry run outputs
 dry_run_*.csv
+review_*.csv
 
 # IDE
 *.code-workspace

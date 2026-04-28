@@ -195,6 +195,7 @@ corrections (
 
 1. **`is_internal_transfer` flag** — set by deduplicator pre-categorization → `Internal Transfer`, confidence 1.0
 2. **Corrections DB lookup** — `canonical_merchant` match → apply cached category, confidence 0.80–0.95 (scales with `confidence_count`)
+2.5. **Contact match** — savings accounts only; canonical merchant matched against contacts VCF + alias file → `Other` + `splitwise_candidate = 1`, confidence 0.90–0.95
 3. **SBI raw pattern rules** — regex on raw description (ACH DR, IMPS bank codes, ATM WDL, etc.) → confidence 0.90
 4. **YAML keyword rules** — `categories.yaml` keywords vs cleaned + raw description → confidence 0.80
 5. **LLM fallback** — Ollama (`llama3`), prompted with canonical category list from yaml, returns `{category, confidence}` JSON
@@ -206,8 +207,24 @@ corrections (
 
 **Artifacts:**
 - `core/categorizer.py` — full decision tree implementation
+- `core/contact_matcher.py` — VCF parser + alias lookup + fuzzy match (difflib, no deps)
+- `contacts/contacts.vcf` — exported phone contacts (238 contacts)
+- `config/contact_aliases.yaml` — legal name ↔ nickname mappings (grows as new names appear)
 - `core/db.py` — `category_source TEXT` + `confidence REAL` columns added (with migration for existing DBs)
 - `main.py` — dry-run CSV includes `category_source` + `confidence`; terminal prints source % breakdown
+
+**Contact match design:**
+- Alias file checked first (confidence 0.95) — handles nickname ↔ legal name gap (e.g. "Karkala Su" → "Suresh pai")
+- VCF token match second (confidence 0.90) — any name token ≥4 chars found in merchant string
+- VCF fuzzy match last (confidence 0.80–0.85) — difflib ratio ≥ 0.72
+- Only fires on savings accounts (`acc_*`); CCs don't do UPI P2P
+- Corrections DB wins over contact match — explicit user correction always takes precedence
+
+**Confirmed aliases (2026-04-27):**
+| bank_pattern | contact | relation |
+|---|---|---|
+| Roma Pa / Roma  Pai | Roma Pai | self |
+| Karkala Su / Suresh Pa | Suresh pai | family (dad) |
 
 **category_source distribution across all statements (post Canara seeding):**
 | Source | Example statements |
@@ -216,19 +233,20 @@ corrections (
 | `corrections_db` | BOB: 98% / ICICI CC: 60% / Canara: 50% / HDFC: 38% |
 | `raw_rules` | SBI spendable: 47% |
 | `yaml_rules` | ICICI CC: 40% / Canara: 12% |
+| `contact_match` | Canara: expected ~10–15% of "Other" rows once run on fresh month |
 | `fallback` (Other) | Canara: 37% — mostly UPI person payments, one-off vendors |
 
 **Known gaps (not blocking):**
-- Splitwise / contact-based check: not implemented (no contacts list yet)
+- Contact match fires after corrections DB — repeat personal payments already cached won't hit this step
 - Time + amount pattern rules: not implemented (low ROI vs corrections DB)
 - Bank CC category hint: not passed to LLM (minimal signal given corrections DB coverage)
-- Canara internal transfers: 0 flagged — Canara↔SBI/CC flows need Block 5 reconciliation
+- Canara internal transfers: 0 flagged — Canara↔SBI/CC flows handled by Block 5 reconciliation
 
 ---
 
 ## Block 4 — Dry-Run Review Interface
 
-**Status:** ⬜ Not started
+**Status:** ✅ Done
 
 **Role:** Monthly human-in-the-loop step. Where corrections get captured and fed back into system.
 
@@ -242,8 +260,27 @@ corrections (
   - **Upserts** `canonical_merchant → category` mapping into corrections DB (Block 2).
 - **Key principle:** one correction updates both transaction AND rule for all future transactions.
 
-**Output:**
-> _Fill in when done. Examples: path to dry-run script, sample Excel template, path to re-import script, average corrections per month after system stabilizes._
+**Output (done 2026-04-27):**
+
+**Two workflows covered:**
+
+**Pre-insert (fresh month):**
+1. `uv run python main.py <file> --dry-run` → sorted CSV with blank `corrected_category` + `transfer_type` cols
+2. Fill corrections in CSV (blank = accept current)
+3. `uv run python import_corrections.py <csv> --save` → INSERT to DB + upsert corrections cache
+
+**Post-insert (retroactive fix):**
+1. `uv run python review.py export --month YYYY-MM [--excel]` → CSV or Excel from DB
+2. Fill `corrected_category` column
+3. `uv run python review.py apply <file> --save` → UPDATE DB rows + upsert corrections cache
+
+**Artifacts:**
+- `main.py` — dry-run: sorted (Other first → low-conf → rest), includes `corrected_category` + `transfer_type` blank cols
+- `import_corrections.py` — pre-insert: INSERT + cache upsert (existing, Block 2)
+- `review.py` — post-insert: `export` pulls from DB; `apply` matches by row id/composite key → UPDATE + cache upsert
+- Excel export: openpyxl dropdown for `corrected_category`, colour-coded rows (red=Other, amber=low-conf, green=high-conf)
+
+**Sorting:** Other → ascending confidence → date (worst first, fix fastest)
 
 ---
 
@@ -319,9 +356,32 @@ Statement files (PDF/Excel)
 
 > _Scratchpad for things learned as you go — prompt tweaks, weird edge cases, merchant aliases, ideas for Phase 2._
 
-- BOB joint account — my share = sum of my outflows to that account. Dad's contributions don't appear in my statements. 
-- BBPS = payment rail not merchant. Tag as Utilities & Bills by default. Sub-biller detail not available from bank statements — enrich from biller apps in Phase 2 if needed. On savings account side, large BBPS amounts near CC due date = CC settlement.
-- NEFT/IMPS keyword too broad for internal transfer detection — needs contact check first. Known contacts: dad (suresh pai variants), self (roma pa variants). BOB joint account = Savings & Investment, not family transfer."
+### Accounts & Transfers
+- BOB joint account — my share = sum of my outflows to that account. Dad's contributions don't appear in my statements.
+- All three CCs (HDFC Millennia, Amazon ICICI, Axis SuperMoney) pay from `acc_canara_daily`.
+- NEFT/IMPS keyword too broad for internal transfer detection — contact match + alias file handles this now. BOB joint account = Savings & Investment, not family transfer.
+
+### Contact Matching (added 2026-04-27)
+- Phone contacts exported to `contacts/contacts.vcf` (238 contacts). Re-export when contacts change.
+- Core problem: contacts saved as nicknames (Amma, Dad) but bank shows legal names (Karkala Roopa Pai, Karkala Suresh Pai) truncated to 8–10 chars. String matching alone can't bridge this.
+- Solution: two-layer matching — alias file (exact, high priority) + VCF fuzzy match (token/ratio, lower priority).
+- Alias file (`config/contact_aliases.yaml`) grows incrementally: when dry-run shows unknown person merchant, add one line. Don't need to pre-populate exhaustively.
+- Confirmed working: "Karkala Su" / "Suresh Pa" → Suresh pai (dad). "Roma Pa" → Roma Pai (self).
+- Mom's bank name variant not yet added to aliases — add when it appears in a statement.
+- Contact match → `splitwise_candidate = 1` + category `Other` (review queue). User corrects via Block 4; correction caches the merchant for future runs.
+
+### CC Payments & Reconciliation (Block 5)
+- CRED splits into: **Cred Club** = CC bill payment (reconcile as CC Settlement), **Cred Store** = purchase (genuine spend), **Cred Rent** = rent payment (tag as Rent). Pattern must be specific to `\bcred\s*club\b`.
+- Bare "HDFC" in UPI raw description is NOT a CC payment signal — it's the PSP bank in VPAs like `**.bdsi@hdfcbank`, and transaction hashes like `HDF...CC...3FE` can false-match `hdfcbank.*cc`. CC payment patterns must require "credit card" / "cc bill" / card name explicitly.
+- Dates stored in DB as DD/MM/YYYY — SQLite string comparison breaks for date range queries. Always filter in Python using `_parse_date()`.
+- 9 CRED Club CC payments on Canara for 2025 (Jan–Oct, ₹12K–₹60K). 0 matched on first run — 2025 CC statements not in DB yet. Will auto-match once loaded.
+- ₹60,249 on 25/03/2025 (Cred Club) unusually large — likely paid multiple CCs in one CRED transaction. May not match any single CC's monthly total; flag for manual split if needed.
+- BBPS = payment rail not merchant. Tag as Utilities & Bills by default. Sub-biller detail not available from bank statements — enrich from biller apps in Phase 2. Large BBPS near CC due date = possible CC settlement (secondary signal, lower confidence than Cred Club).
+
+### Block 4 Workflow
+- Two distinct flows: `main.py --dry-run` → `import_corrections.py --save` (fresh month, pre-insert INSERT flow). `review.py export` → `review.py apply --save` (retroactive fix, post-insert UPDATE flow).
+- `import_corrections.py` does INSERT only. `review.py apply` does UPDATE only. Never mix the two.
+- Dry-run CSV sorted: Other first → ascending confidence → date. Worst rows at top = fix fastest.
 
 ---
 

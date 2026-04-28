@@ -4,8 +4,10 @@ config/accounts.yaml
 data/
 data_preview/
 data_corrections/
+contacts/
 *.db
 dry_run_*.csv
+review_*.csv
 
 # Python
 __pycache__/
