@@ -19,6 +19,7 @@ import json
 import requests
 from core.description_cleaner import clean_description
 import core.corrections_db as corrections_db
+from core.contact_matcher import get_contacts, get_aliases, match_contact
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "categories.yaml")
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -121,8 +122,10 @@ Use "Other" if genuinely unsure. No explanation, no extra text."""
 
 
 def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> list[dict]:
-    rules = load_rules()
+    rules      = load_rules()
     valid_cats = set(rules.keys())
+    contacts   = get_contacts()
+    aliases    = get_aliases()
     corrections_db.init_corrections_table()
 
     for txn in transactions:
@@ -145,6 +148,20 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
             txn["category_source"] = "corrections_db"
             txn["confidence"] = conf
             continue
+
+        # Step 2.5: contact match — UPI P2P payments to known people
+        # Only on savings accounts (CCs don't do UPI P2P)
+        source = txn.get("source_id", "")
+        is_savings = source.startswith("acc_")
+        if is_savings and canonical:
+            contact = match_contact(canonical, contacts, aliases)
+            if contact:
+                txn["category"] = "Other"
+                txn["category_source"] = "contact_match"
+                txn["confidence"] = contact["confidence"]
+                txn["splitwise_candidate"] = 1
+                txn["notes"] = (txn.get("notes") or "") + f" [contact: {contact['name']}]"
+                continue
 
         # Step 3: SBI raw pattern rules
         cat = _raw_rules_match(raw)

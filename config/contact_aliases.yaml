@@ -1,0 +1,36 @@
+# Contact aliases — maps bank name fragments to contact details.
+#
+# Why this exists: contacts are saved with nicknames (Amma, Papa) but bank
+# statements show legal names (Karkala Roopa Pai → truncated to "Karkala Ro").
+# String matching can't bridge this gap — add aliases here as they appear.
+#
+# Format:
+#   - bank_pattern: substring that appears in canonical_merchant (case-insensitive)
+#     contact_name: display name (how you know them)
+#     relation: self | family | friend | other
+#     note: optional context
+#
+# Add entries when a dry-run shows an unknown merchant that's actually a person.
+
+aliases:
+  # ── Self ────────────────────────────────────────────────────────────────────
+  - bank_pattern: "Roma Pa"
+    contact_name: "Roma Pai"
+    relation: self
+    note: "Self transfer — Roma Pai K"
+
+  - bank_pattern: "Roma  Pai"
+    contact_name: "Roma Pai"
+    relation: self
+
+  # ── Family ──────────────────────────────────────────────────────────────────
+
+  - bank_pattern: "Karkala Su"
+    contact_name: "Suresh pai"
+    relation: family
+    note: "Dad — Karkala Suresh Pai"
+
+  - bank_pattern: "Suresh Pa"
+    contact_name: "Suresh pai"
+    relation: family
+    note: "Dad — may appear without Karkala prefix"
