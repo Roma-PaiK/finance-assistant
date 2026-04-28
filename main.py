@@ -65,10 +65,20 @@ def process_statement(file_path: str, dry_run: bool = False, csv_path: str = Non
         default_name = f"dry_run_{os.path.splitext(os.path.basename(file_path))[0]}_{timestamp}.csv"
         out = csv_path or default_name
         df = pd.DataFrame(txn_dicts)
- 
-        # Reorder columns for readability
-        cols = ["date", "month", "txn_type", "amount", "category",
-                "category_source", "confidence",
+
+        # Add blank review columns
+        df["corrected_category"] = ""
+        df["transfer_type"] = ""
+
+        # Sort: Other first → low confidence → rest (fix worst first)
+        df["_sort_other"] = (df["category"] == "Other").astype(int)
+        df = df.sort_values(["_sort_other", "confidence"], ascending=[False, True])
+        df = df.drop(columns=["_sort_other"])
+
+        # Reorder columns for readability — review cols up front
+        cols = ["date", "month", "txn_type", "amount",
+                "corrected_category", "transfer_type",
+                "category", "category_source", "confidence",
                 "is_internal_transfer", "description", "raw_description",
                 "canonical_merchant", "source_id", "source_label", "notes"]
         df = df[[c for c in cols if c in df.columns]]
