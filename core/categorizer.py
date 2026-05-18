@@ -23,7 +23,11 @@ from core.contact_matcher import get_contacts, get_aliases, match_contact
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "categories.yaml")
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "llama3"
+OLLAMA_MODEL = "qwen2.5:7b"
+OLLAMA_TIMEOUT = 30  # qwen 7B cold-load can take ~10-15s on first call
+
+# Module-level counters for LLM call accounting (reset per categorize_transactions run)
+_llm_stats = {"sent": 0, "returned_valid": 0, "returned_other": 0, "errors": 0}
 
 
 def load_rules() -> dict[str, list[str]]:
@@ -89,7 +93,76 @@ def _yaml_rules_match(text: str, rules: dict) -> str | None:
     return None
 
 
-def _llm_categorize(description: str, raw: str, valid_categories: set[str]) -> tuple[str, float]:
+def _llm_batch_categorize(txn_batch: list[dict], valid_categories: set[str]) -> dict:
+    """
+    Batch LLM categorization for multiple transactions (10x faster than sequential).
+    Args: txn_batch list of dicts with 'description', 'raw_description', 'index'
+    Returns: dict mapping index → (category, confidence, status)
+    """
+    if not txn_batch:
+        return {}
+    _llm_stats["sent"] += len(txn_batch)
+    cats_list = "\n".join(f"- {c}" for c in sorted(valid_categories))
+    txn_lines = [
+        f'{{"index": {t["index"]}, "desc": "{t.get("description", "")}", "raw": "{t.get("raw_description", "") or t.get("description", "")}"}}'
+        for t in txn_batch
+    ]
+    prompt = f"""Categorize these {len(txn_batch)} bank transactions (Indian user):
+Categories: {", ".join(sorted(valid_categories))}
+
+Transactions:
+[{", ".join(txn_lines)}]
+
+Reply ONLY with JSON array:
+[{{"index": <int>, "category": "<cat>", "confidence": <0.0-1.0>}}, ...]
+Use "Other" if unsure."""
+
+    try:
+        resp = requests.post(OLLAMA_URL, json={
+            "model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": "json"
+        }, timeout=OLLAMA_TIMEOUT * 2)
+        if resp.status_code != 200:
+            return {t["index"]: ("Other", 0.0, "http_error") for t in txn_batch}
+        text = resp.json().get("response", "").strip()
+        match = re.search(r'\[.*?\]', text, re.DOTALL)
+        if not match:
+            return {t["index"]: ("Other", 0.0, "no_json") for t in txn_batch}
+        results = json.loads(match.group())
+        result_map = {}
+        for res in results:
+            idx, cat, conf = res.get("index"), res.get("category", "Other"), float(res.get("confidence", 0.6))
+            if cat == "Other":
+                _llm_stats["returned_other"] += 1
+            elif cat not in valid_categories:
+                _llm_stats["errors"] += 1
+                cat = "Other"
+            else:
+                _llm_stats["returned_valid"] += 1
+            result_map[idx] = (cat, conf, "valid" if cat != "Other" else "other")
+        return {t["index"]: result_map.get(t["index"], ("Other", 0.0, "missing")) for t in txn_batch}
+    except requests.Timeout:
+        return {t["index"]: ("Other", 0.0, "timeout") for t in txn_batch}
+    except requests.ConnectionError:
+        return {t["index"]: ("Other", 0.0, "conn_error") for t in txn_batch}
+    except Exception as e:
+        return {t["index"]: ("Other", 0.0, "exception") for t in txn_batch}
+
+
+def _llm_categorize(description: str, raw: str, valid_categories: set[str]) -> tuple[str, float, str]:
+    """Call Ollama. Returns (category, confidence, status).
+
+    status values:
+      - "valid"        : LLM returned a category in valid_categories (not Other)
+      - "other"        : LLM legitimately returned "Other"
+      - "invalid_cat"  : LLM returned a string not in valid_categories
+      - "no_json"      : Response had no JSON object
+      - "http_error"   : Non-200 from Ollama
+      - "timeout"      : Request timed out
+      - "conn_error"   : Could not reach Ollama
+      - "exception"    : Any other error
+    """
+    _llm_stats["sent"] += 1
+
     cats_list = "\n".join(f"- {c}" for c in sorted(valid_categories))
     prompt = f"""You are a personal finance categorizer for an Indian user.
 Categorize this bank transaction into EXACTLY ONE of these categories:
@@ -106,19 +179,42 @@ Use "Other" if genuinely unsure. No explanation, no extra text."""
             "model": OLLAMA_MODEL,
             "prompt": prompt,
             "stream": False,
-        }, timeout=15)
+            "format": "json",  # qwen2.5 supports forced JSON output
+        }, timeout=OLLAMA_TIMEOUT)
+        if resp.status_code != 200:
+            _llm_stats["errors"] += 1
+            print(f"   ⚠️  LLM HTTP {resp.status_code}: {resp.text[:120]}")
+            return "Other", 0.0, "http_error"
         text = resp.json().get("response", "").strip()
         match = re.search(r'\{.*?\}', text, re.DOTALL)
-        if match:
-            data = json.loads(match.group())
-            cat = data.get("category", "Other")
-            conf = float(data.get("confidence", 0.6))
-            if cat not in valid_categories:
-                return "Other", 0.0
-            return cat, conf
-    except Exception:
-        pass
-    return "Other", 0.0
+        if not match:
+            _llm_stats["errors"] += 1
+            print(f"   ⚠️  LLM no JSON in response: {text[:120]}")
+            return "Other", 0.0, "no_json"
+        data = json.loads(match.group())
+        cat = data.get("category", "Other")
+        conf = float(data.get("confidence", 0.6))
+        if cat == "Other":
+            _llm_stats["returned_other"] += 1
+            return "Other", conf, "other"
+        if cat not in valid_categories:
+            _llm_stats["errors"] += 1
+            print(f"   ⚠️  LLM invalid category '{cat}' not in taxonomy")
+            return "Other", 0.0, "invalid_cat"
+        _llm_stats["returned_valid"] += 1
+        return cat, conf, "valid"
+    except requests.Timeout:
+        _llm_stats["errors"] += 1
+        print(f"   ⚠️  LLM timeout after {OLLAMA_TIMEOUT}s — model loading? skipping txn")
+        return "Other", 0.0, "timeout"
+    except requests.ConnectionError:
+        _llm_stats["errors"] += 1
+        print(f"   ⚠️  LLM connection failed — is Ollama running on {OLLAMA_URL}?")
+        return "Other", 0.0, "conn_error"
+    except Exception as e:
+        _llm_stats["errors"] += 1
+        print(f"   ⚠️  LLM exception: {type(e).__name__}: {e}")
+        return "Other", 0.0, "exception"
 
 
 def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> list[dict]:
@@ -128,7 +224,16 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
     aliases    = get_aliases()
     corrections_db.init_corrections_table()
 
-    for txn in transactions:
+    # Reset LLM stats for this run
+    _llm_stats["sent"] = 0
+    _llm_stats["returned_valid"] = 0
+    _llm_stats["returned_other"] = 0
+    _llm_stats["errors"] = 0
+
+    # PASS 1: apply rules, collect LLM fallback candidates
+    llm_candidates = []  # list of (idx, cleaned, raw) for batch LLM call
+
+    for idx, txn in enumerate(transactions):
         raw = txn.get("raw_description", "") or txn.get("description", "")
         cleaned = clean_description(raw)
         txn["description"] = cleaned
@@ -150,7 +255,6 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
             continue
 
         # Step 2.5: contact match — UPI P2P payments to known people
-        # Only on savings accounts (CCs don't do UPI P2P)
         source = txn.get("source_id", "")
         is_savings = source.startswith("acc_")
         if is_savings and canonical:
@@ -179,19 +283,30 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
             txn["confidence"] = 0.8
             continue
 
-        # Step 5: LLM fallback
+        # Step 5: LLM fallback — collect for batch processing
         if use_llm:
-            cat, conf = _llm_categorize(cleaned, raw, valid_cats)
-            if cat != "Other":
-                txn["category"] = cat
-                txn["category_source"] = "llm"
-                txn["confidence"] = conf
-                continue
+            llm_candidates.append({"index": idx, "description": cleaned, "raw_description": raw})
 
-        # Step 6: Other fallback
-        txn["category"] = "Other"
-        txn["category_source"] = "fallback"
-        txn["confidence"] = 0.0
+    # PASS 2: Batch LLM call for all fallback candidates
+    if use_llm and llm_candidates:
+        BATCH_SIZE = 15
+        for batch_start in range(0, len(llm_candidates), BATCH_SIZE):
+            batch = llm_candidates[batch_start:batch_start + BATCH_SIZE]
+            results = _llm_batch_categorize(batch, valid_cats)
+            for item in batch:
+                idx = item["index"]
+                # Batch always returns a result (or defaults to Other internally)
+                cat, conf, status = results.get(idx, ("Other", 0.0, "missing"))
+                transactions[idx]["category"] = cat
+                transactions[idx]["category_source"] = "llm" if cat != "Other" else "fallback"
+                transactions[idx]["confidence"] = conf
+
+    # Step 6: Verify ALL transactions have a category (safety check)
+    for txn in transactions:
+        if "category" not in txn or not txn["category"]:
+            txn["category"] = "Other"
+            txn["category_source"] = "fallback"
+            txn["confidence"] = 0.0
 
     # Sync is_internal_transfer flag post-categorization
     for txn in transactions:
