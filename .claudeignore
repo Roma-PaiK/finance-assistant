@@ -4,11 +4,13 @@ config/accounts.yaml
 
 # Bank statements (raw files)
 data/
+dry_runs/
 *.pdf
 *.xlsx
 *.xls
 *.csv
 contacts/
+*.original.md
 
 # Database
 *.db
