@@ -1,6 +1,7 @@
-# Finance Assistant — Phase 1: Tagging Workflow
+# Finance Assistant — Phase 2: Insights & Reporting
 
-**Goal:** Reliable, low-effort transaction categorization across savings + credit cards. Phase 2 (budgeting, savings advice, investment insights) needs clean data.
+> **Phase 1 summary:** see `claude_phase_1.md`  
+> **Phase 1 artifacts:** `core/`, `parsers/`, `config/`, `main.py`, `review.py`, `import_corrections.py`, `check_db.py`, `clear_db.py`
 
 ---
 
@@ -8,400 +9,568 @@
 
 Each block has **Status**, **Role**, **What to do**, **Output**.
 
-After block done, update:
+After a block is done, update:
 - `Status:` → `✅ Done` (or `🟡 In progress`, `⬜ Not started`, `🔁 Needs revisit`)
-- `Output:` → replace with actual artifact (file path, table name, sample output, notes)
+- `Output:` → replace with actual result (file path, sample output, notes)
 
-Status legend:
-- ⬜ Not started
-- 🟡 In progress
-- ✅ Done
-- 🔁 Needs revisit
+Status legend: ⬜ Not started · 🟡 In progress · ✅ Done · 🔁 Needs revisit
 
 ---
 
-## Phase 1 "Done" Criteria
+## Phase 2 "Done" Criteria
 
-All three must hold on real monthly data:
-
-- [ ] >90% transactions tagged by cache/rules (no LLM call) on fresh month
-- [ ] Dry-run corrections per month under ~20 rows
-- [ ] Eval harness shows stable accuracy across two consecutive months without prompt changes
+All three must hold:
+- Monthly spend report generated in <10s with no manual correction needed
+- Budget variance flags catch genuine overruns (not internal transfer noise)
+- Two consecutive months of reports where category totals feel correct on gut check
 
 ---
 
-## Block 0 — Foundation: Canonical Taxonomy & Merchant Normalization
+## ⚠️ Pre-conditions Before Any Block Below
+
+Two deferred Phase 1 blocks must be done (or explicitly accepted as gaps) before Phase 2 spend totals are trustworthy:
+
+| Pre-condition | Why it matters |
+|---|---|
+| Block 5 — CC reconciliation | Without it, every CC bill payment on savings double-counts the spend |
+| Block 5B — Statement re-upload dedup | Without it, re-uploading any statement silently duplicates rows in DB |
+
+---
+
+## Block 5 — Cross-Source CC Reconciliation (Deferred from Phase 1)
 
 **Status:** ✅ Done
 
-**Role:** Nothing downstream works if merchants aren't comparable across sources. Zomato on HDFC CC, Zomato via UPI, Zomato via Paytm must all resolve to same canonical name.
+**Role:** De-duplicate spend across savings + credit cards. Without this, every CC bill payment double-counts the same spend — it's both on the CC statement (individual charges) and on the savings statement (the lump payment out). Category totals in Phase 2 are wrong until this is done.
+
+**Confirmed behaviour:**
+- Always pay one CC at a time — no multi-CC lump payments. Each outflow on savings maps to exactly one CC's bill.
+- CC payments go out from **either Canara (`acc_canara_daily`) or HDFC savings (`acc_hdfc_emi`)** — both accounts must be checked, not just Canara.
+
+**All active credit cards (4 total):**
+
+| Card | Source ID | Statement format | Likely payment source |
+|---|---|---|---|
+| HDFC Moneyback | `cc_hdfc_moneyback` | HDFC CC PDF | Canara or HDFC savings |
+| Amazon ICICI | `cc_amazon_icici` | ICICI CC PDF | Canara or HDFC savings |
+| Axis Supermoney | `cc_supermoney_axis` | Axis CC PDF | Canara or HDFC savings |
+| Tata Neu HDFC | `cc_hdfc_tataneu` | HDFC CC PDF (same format as Moneyback) | Canara or HDFC savings |
 
 **What to do:**
-- Lock final category list. Start from 9 in financeEnv. Decide:
-  - Want `Internal Transfer` as own top-level category (recommended)?
-  - Split `Other` into sub-buckets, or leave as review queue?
-- Build/extend description cleaner: any raw string (UPI/X/Y/Z, POS CHARGE, NEFT-ABC-...) returns `canonical_merchant`.
-- Handle common Indian statement noise: UPI prefixes, trip IDs, transaction ref numbers, trailing digits.
-- Spot-check cleaner against sample of each statement type before trusting.
 
-**Output:**
+- For each CC bill payment outflow on Canara or HDFC savings (CRED Club / BBPS near CC due date):
+  - Identify which CC card it's for (from merchant pattern or amount match)
+  - Find the matching CC statement "total due" or "minimum due" amount within a ±5-day window of the CC due date
+  - Link them; mark savings-side transaction as `cc_settlement`, not genuine spend
+- For each individual CC charge: count once, on the CC side only
+- Classification taxonomy for every transaction: `genuine_spend` | `cc_settlement` | `internal_transfer` | `refund`
+- Add `transaction_type` column to DB (migration needed); populate at reconciliation time
 
-**Canonical Category List (locked 2026-04-25, source of truth: `config/categories.yaml`):**
-| # | Category |
-|---|----------|
-| 1 | Food & Dining |
-| 2 | Groceries |
-| 3 | Fuel & Transport |
-| 4 | Utilities & Bills |
-| 5 | Rent |
-| 6 | EMI & Loan |
-| 7 | Health & Medical |
-| 8 | Shopping & Apparel |
-| 9 | Entertainment & Subscriptions |
-| 10 | Education |
-| 11 | Investment & SIP |
-| 12 | Credit Card Payment |
-| 13 | Internal Transfer |
-| 14 | Internal Transfer — Self |
-| 15 | Internal Transfer — Other |
-| 16 | ATM & Cash |
-| — | Other *(review queue — low-confidence fallback)* |
+**Schema addition:**
 
-Notes:
-- `Other` = NOT real category; review queue (Block 4 dry-run).
-- `Internal Transfer — Self/Other` sub-types set at import time via `transfer_type` column in dry-run CSV.
-
-**Merchant normalization — `core/description_cleaner.py`** (done 2026-04-16):
-
-| Function | Output | Example |
-|----------|--------|---------|
-| `get_canonical_merchant(raw)` | Stable DB key | `"Zomato"`, `"Flipkart Paytm"`, `"Karkala Ro"` |
-| `clean_description(raw)` | Human display | `"UPI - Zomato"`, `"IMPS - Karkala Ro"`, `"Auto Debit - HDFC Ergo"` |
-
-Handled formats:
-- HDFC savings: `UPI-MERCHANT-VPA@PSP-BANKREF`
-- SBI/Canara savings: `UPI/DR|CR|DB/REFNUM/MERCHANT/...` and `MOB-IMPS-CR/PAYEE/BANK/...`
-- Axis CC: `UPI/MERCHANT/VPA@PSP/TXNREF`
-- ICICI/HDFC CC: plain merchant strings (fallback strip of location noise)
-- All banks: `ACH DR/CR`, `ATM WDL`, `NEFT`, `CMP` (salary), `INT.CR`
-
-`Transaction.canonical_merchant` field added to schema (populated at parse time).
-
----
-
-## Block 1 — Ingestion & Extraction Hardening
-
-**Status:** ✅ Done
-
-**Role:** Fix "PDF extraction misses rows / grabs junk" before tagging. Garbage in = garbage tagged; waste hours chasing tagging bugs that are really extraction bugs.
-
-**What to do:**
-- For each statement type (each bank PDF, each Excel), add **validation step**:
-  - Count rows extracted vs. expected (use "total debit/credit count" on most Indian statements, or opening/closing balance math).
-  - Mismatch → flag file, halt. No silent pass to tagging.
-- Strip non-transaction filler (addresses, customer IDs, email headers) here, not later.
-- Tag each row with `source_account` on ingestion.
-- Standardize schema across sources: `date`, `raw_description`, `amount`, `direction (debit/credit)`, `source_account`, `bank_category` (nullable, for CCs).
-
-**Output (done 2026-04-16):**
-
-**Supported statement types + validation coverage:**
-| Bank | Format | Validation |
-|------|--------|-----------|
-| SBI | XLSX | Balance math (opening/closing from metadata) |
-| Canara | CSV / XLSX | Balance math (same metadata format as SBI) |
-| HDFC savings | XLS | warn — no balance labels in header block |
-| BOB | XLS | warn — no balance labels in header block |
-| HDFC Moneyback CC | PDF | warn — no balance math for CCs |
-| Amazon ICICI CC | PDF | warn — no balance math for CCs |
-| Axis Supermoney CC | PDF | warn — no balance math for CCs |
-
-**Validation statuses:** `pass` (delta ≤ ₹2) / `warn` (no metadata, row count > 0) / `fail` (mismatch or 0 rows → pipeline halts)
-
-**Artifacts:**
-- `parsers/validator.py` — `ParseValidation` dataclass + `validate_balance()` fn
-- `parsers/base.py` — `ParseResult` wrapper; `parse()` returns `ParseResult`; `_find_balance_metadata()` scans pre-header rows
-- `main.py` — halts on `fail`, skips categorization + DB insert
-- `core/db.py` — `canonical_merchant` column + index added to transactions table
-
-**Filler stripping:** non-date rows (totals, addresses, footnotes) skipped by date-parse guard in `_extract_transactions` — no separate strip pass needed.
-
----
-
-## Block 2 — Corrections Database (The Cache)
-
-**Status:** ✅ Done
-
-**Role:** System memory. Every correction lives here. Makes system faster over time instead of re-writing same rules.
-
-**Output (done 2026-04-21):**
-
-**Schema — `core/corrections_db.py`:**
-```python
-corrections (
-  canonical_merchant  TEXT PRIMARY KEY,
-  category            TEXT NOT NULL,
-  confidence_count    INTEGER DEFAULT 1,   # increments on repeat corrections
-  last_seen_date      TEXT,
-  source_account_hint TEXT,                # e.g. "cc_hdfc_moneyback" if merchant ≠ across accounts
-  notes               TEXT
-)
+```sql
+-- Add via migration in core/db.py
+ALTER TABLE transactions ADD COLUMN transaction_type TEXT DEFAULT 'genuine_spend';
+ALTER TABLE transactions ADD COLUMN linked_statement_id INTEGER; -- FK to statement_log.id
+-- transaction_type values: genuine_spend | cc_settlement | internal_transfer | refund | flagged
 ```
 
-**Operations:**
-- `lookup(canonical_merchant)` → returns category or None
-- `upsert(canonical_merchant, category, source_account_hint, notes)` → inserts or increments confidence
-- `get_all()` → list of all rows sorted by confidence desc
-- `stats()` → {"total_merchants": N, "high_confidence_3plus": M}
+**CC statement format handling — two formats exist:**
 
-**Seeding workflow:**
-1. Generate dry-runs with `main.py --dry-run` on all statements
-2. User corrects `corrected_category` column in each dry-run CSV (add column; blank = accept current)
-3. For Internal Transfer rows: user adds `transfer_type` column (self/others/unknown)
-4. Run `import_corrections.py <csv> [...]` to preview; `--save` to commit to DB + cache
-5. Merge rule applied at import time:
-   - `Internal Transfer + self → "Internal Transfer — Self"`
-   - `Internal Transfer + others → "Internal Transfer — Other"`
-   - `Internal Transfer + unknown → "Internal Transfer"` (flagged for review)
-   - `transfer_type` column dropped after merge
-
-**Seed snapshot (2026-04-21) from all corrected dry-runs:**
-- **6 statement files corrected** (BOB, SBI, HDFC savings, HDFC CC, Amazon CC, Axis CC)
-- **398 transactions seeded into DB**
-- **61 unique merchants cached**
-- **8 merchants at high confidence (3+ occurrences)**
-- **0 rows flagged for review** (all transfer_type decisions made)
-
-**Artifacts:**
-- `core/corrections_db.py` — cache ops
-- `import_corrections.py` — CSV importer with preview + `--save` mode
-- `config/categories.yaml` — extended with `Internal Transfer — Self/Other` sub-types
-- `config/accounts.yaml` — label→source_id mapping (loaded at import time)
-
-**Key design:**
-- Single source of truth: categories from `categories.yaml`, source IDs from `accounts.yaml`
-- Transfer type merge happens at import, not display — DB stores only final merged category
-- Merchant string normalization happens in `description_cleaner.get_canonical_merchant()` at parse time
-
----
-
-## Block 3 — Categorization Pipeline (The Decision Tree)
-
-**Status:** ✅ Done
-
-**Role:** Tagging engine. Runs on every transaction. First hit wins — order matters.
-
-**Implemented decision tree (in order):**
-
-1. **`is_internal_transfer` flag** — set by deduplicator pre-categorization → `Internal Transfer`, confidence 1.0
-2. **Corrections DB lookup** — `canonical_merchant` match → apply cached category, confidence 0.80–0.95 (scales with `confidence_count`)
-2.5. **Contact match** — savings accounts only; canonical merchant matched against contacts VCF + alias file → `Other` + `splitwise_candidate = 1`, confidence 0.90–0.95
-3. **SBI raw pattern rules** — regex on raw description (ACH DR, IMPS bank codes, ATM WDL, etc.) → confidence 0.90
-4. **YAML keyword rules** — `categories.yaml` keywords vs cleaned + raw description → confidence 0.80
-5. **LLM fallback** — Ollama (`llama3`), prompted with canonical category list from yaml, returns `{category, confidence}` JSON
-6. **"Other" fallback** — LLM returns Other or fails → `category_source: fallback`, confidence 0.0
-
-**Every transaction gets:** `category`, `category_source`, `confidence`
-
-**Output (done 2026-04-27):**
-
-**Artifacts:**
-- `core/categorizer.py` — full decision tree implementation
-- `core/contact_matcher.py` — VCF parser + alias lookup + fuzzy match (difflib, no deps)
-- `contacts/contacts.vcf` — exported phone contacts (238 contacts)
-- `config/contact_aliases.yaml` — legal name ↔ nickname mappings (grows as new names appear)
-- `core/db.py` — `category_source TEXT` + `confidence REAL` columns added (with migration for existing DBs)
-- `main.py` — dry-run CSV includes `category_source` + `confidence`; terminal prints source % breakdown
-
-**Contact match design:**
-- Alias file checked first (confidence 0.95) — handles nickname ↔ legal name gap (e.g. "Karkala Su" → "Suresh pai")
-- VCF token match second (confidence 0.90) — any name token ≥4 chars found in merchant string
-- VCF fuzzy match last (confidence 0.80–0.85) — difflib ratio ≥ 0.72
-- Only fires on savings accounts (`acc_*`); CCs don't do UPI P2P
-- Corrections DB wins over contact match — explicit user correction always takes precedence
-
-**Confirmed aliases (2026-04-27):**
-| bank_pattern | contact | relation |
+| Format | When | What to extract |
 |---|---|---|
-| Roma Pa / Roma  Pai | Roma Pai | self |
-| Karkala Su / Suresh Pa | Suresh pai | family (dad) |
+| Single-month statement | Recent months | Billing period, total due, min due, due date — all from one PDF |
+| Consolidated multi-cycle document | Older months | Multiple billing cycles in one file. Parser must split by cycle boundary, extract per-cycle: period start/end, total due, due date. Each cycle treated as a separate statement period in `statement_log`. |
 
-**category_source distribution across all statements (post Canara seeding):**
-| Source | Example statements |
-|--------|-------------------|
-| `internal_transfer_flag` | SBI: 62% of rows |
-| `corrections_db` | BOB: 98% / ICICI CC: 60% / Canara: 50% / HDFC: 38% |
-| `raw_rules` | SBI spendable: 47% |
-| `yaml_rules` | ICICI CC: 40% / Canara: 12% |
-| `contact_match` | Canara: expected ~10–15% of "Other" rows once run on fresh month |
-| `fallback` (Other) | Canara: 37% — mostly UPI person payments, one-off vendors |
+For consolidated docs:
+- Detect cycle boundaries by looking for repeating header patterns (e.g. "Statement Date", "Payment Due Date" appearing multiple times in the PDF)
+- Split into logical cycles; parse each independently
+- Ingest each cycle as its own `statement_log` entry with correct `period_start` / `period_end`
+- Block 5B dedup logic applies per-cycle — re-uploading a consolidated doc that overlaps already-ingested cycles will warn per cycle, not block the whole file
 
-**Known gaps (not blocking):**
-- Contact match fires after corrections DB — repeat personal payments already cached won't hit this step
-- Time + amount pattern rules: not implemented (low ROI vs corrections DB)
-- Bank CC category hint: not passed to LLM (minimal signal given corrections DB coverage)
-- Canara internal transfers: 0 flagged — Canara↔SBI/CC flows handled by Block 5 reconciliation
+**Matching logic:**
+
+```
+For each savings outflow tagged as potential CC settlement:
+  1. Check CRED Club pattern → identifies CC card directly (high confidence)
+  2. Check BBPS with biller name → identifies CC card (medium confidence)
+  3. Amount match: savings outflow amount == CC statement "total due" for that card, within ±5 days of due date
+  4. Match found → mark savings row as cc_settlement, link to CC statement period
+  5. No match → flag as `flagged` for manual review (not silent pass)
+```
+
+**Edge cases to handle:**
+- BBPS near CC due date = secondary signal (lower confidence than CRED Club — amount match required)
+- Partial payment (paid minimum due, not full): amount matches `min_due` not `total_due` → flag as partial, still mark as `cc_settlement` but note outstanding balance
+- Payment from HDFC savings for HDFC Moneyback or Tata Neu HDFC CC — same bank, different account type. Two HDFC CCs now exist; if payment comes from HDFC savings, must disambiguate by amount matching against each card's due amount, not by merchant name (which will just say "HDFC" for both)
+- Tata Neu HDFC: statement PDF format is expected to be the same as HDFC Moneyback (both HDFC-issued). Reuse the same parser config in `BANK_CONFIGS`; differentiate by filename keyword `tataneu` or last-4 card digits in `config/accounts.yaml`
+
+**Output:**
+
+> **Done.** `core/reconciler.py` + `reconcile.py` CLI. Matching logic: CRED Club (high conf) → BBPS biller name (medium) → amount match within ±2% or ₹150, 45-day billing window. `reconciliation_links` table logs each match. Unmatched suspected CC payments flagged for manual review. CC settlement marking: savings-side row → `transaction_type = 'cc_settlement'`, `is_internal_transfer = 1`, `category = 'Internal Transfer — CC Settlement'`. Run: `uv run python reconcile.py` (preview) / `--save` (commit). Note: reconciler needs CC statements loaded (Block 12) before matches fire.
 
 ---
 
-## Block 4 — Dry-Run Review Interface
+## Block 5B — Statement Re-upload Dedup (New — Gap from Phase 1)
 
 **Status:** ✅ Done
 
-**Role:** Monthly human-in-the-loop step. Where corrections get captured and fed back into system.
+**Role:** Prevent silent duplicate rows when the same statement period is uploaded more than once. Currently, re-uploading any file (e.g. re-downloading Feb 2025 Canara statement) will INSERT duplicates with no warning. This is a data integrity problem — and it's hard to detect after the fact because the duplicate rows look identical.
+
+**Why this happens:** There is no unique constraint or ingestion registry. `deduplicator.py` handles cross-account internal transfer dedup, not re-upload dedup.
 
 **What to do:**
-- Dry-run exports to Excel/CSV.
-- Sort: low-confidence + `Other` rows at top. Fix worst first.
-- Include `corrected_category` column, blank by default.
-- Re-import script after review:
-  - Reads corrected rows.
-  - Updates transaction's category in main DB.
-  - **Upserts** `canonical_merchant → category` mapping into corrections DB (Block 2).
-- **Key principle:** one correction updates both transaction AND rule for all future transactions.
 
-**Output (done 2026-04-27):**
+- Add a `statement_log` table to track what has been ingested:
 
-**Two workflows covered:**
+```sql
+CREATE TABLE IF NOT EXISTS statement_log (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_account TEXT NOT NULL,       -- e.g. acc_canara_daily
+  period_start  TEXT NOT NULL,        -- earliest date in file (DD/MM/YYYY)
+  period_end    TEXT NOT NULL,        -- latest date in file
+  file_hash     TEXT NOT NULL,        -- SHA256 of file bytes
+  ingested_at   TEXT NOT NULL,        -- timestamp
+  row_count     INTEGER,
+  UNIQUE(source_account, period_start, period_end)
+);
+```
 
-**Pre-insert (fresh month):**
-1. `uv run python main.py <file> --dry-run` → sorted CSV with blank `corrected_category` + `transfer_type` cols
-2. Fill corrections in CSV (blank = accept current)
-3. `uv run python import_corrections.py <csv> --save` → INSERT to DB + upsert corrections cache
+- At import time (`main.py`), before inserting:
+  1. Compute file SHA256
+  2. Check `statement_log` for matching `(source_account, period_start, period_end)`
+  3. If exact file hash match → skip with message: "Already ingested. Use --force to re-import."
+  4. If same period but different hash → warn: "Period overlap detected for `{source}` ({start}–{end}). Re-upload or amended file? Use --force to replace."
+  5. `--force` mode: clears that `(source_account, period_start, period_end)` from transactions and re-inserts
 
-**Post-insert (retroactive fix):**
-1. `uv run python review.py export --month YYYY-MM [--excel]` → CSV or Excel from DB
-2. Fill `corrected_category` column
-3. `uv run python review.py apply <file> --save` → UPDATE DB rows + upsert corrections cache
+- Dry-run (`--dry-run`) bypasses the log check — preview is always safe
 
-**Artifacts:**
-- `main.py` — dry-run: sorted (Other first → low-conf → rest), includes `corrected_category` + `transfer_type` blank cols
-- `import_corrections.py` — pre-insert: INSERT + cache upsert (existing, Block 2)
-- `review.py` — post-insert: `export` pulls from DB; `apply` matches by row id/composite key → UPDATE + cache upsert
-- Excel export: openpyxl dropdown for `corrected_category`, colour-coded rows (red=Other, amber=low-conf, green=high-conf)
+**This replaces the current manual workflow of:**
+```bash
+# What you currently have to do manually:
+uv run clear_db.py --source acc_canara_daily --month 2025-01
+uv run main.py canara_jan.pdf
+```
 
-**Sorting:** Other → ascending confidence → date (worst first, fix fastest)
+**Output:**
+
+> **Done.** `statement_log` table in `core/db.py`. SHA256 hash + `(source_account, period_start, period_end)` unique constraint. On re-upload: exact hash match → skip with message; same period diff hash → warn + block unless `--force`; `--force` deletes existing rows for that period then re-inserts. `--dry-run` bypasses check (preview always safe). DB cleared 2026-05-15; all future imports tracked from clean state.
 
 ---
 
-## Block 5 — Cross-Source Reconciliation
+## Block 6 — Evaluation Harness (Deferred from Phase 1)
 
 **Status:** ⬜ Not started
 
-**Role:** De-duplicate spend across savings + credit cards so category totals are real. Without this, every CC bill payment double-counts.
+**Role:** Answers "did my changes actually improve tagging?" with a number. Without this, every config/prompt tweak is guesswork.
 
 **What to do:**
-- For each CC bill payment outflow on savings:
-  - Find matching CC statement total within date window (±3 days typically).
-  - Link them; mark savings-side as `Internal Transfer — CC Settlement`.
-- For each individual CC charge:
-  - Count once, on CC side only.
-- Port reconciliation logic from financeEnv Task 2 — classification taxonomy (`genuine_spend`, `cc_settlement`, `internal_transfer`, `refund`) already right.
+
+- Freeze current corrected DB as ground truth snapshot (398 seeded transactions = baseline)
+- Build `eval.py`:
+  - Input: raw statement files (same ones used for seeding)
+  - Re-runs full pipeline from scratch (fresh categorization, no corrections DB)
+  - Compares output categories to ground truth
+  - Outputs: accuracy %, per-category breakdown, confusion matrix for top mismatches
+- Track score per iteration — any prompt change, model swap (llama3 → qwen → Haiku), or rule edit triggers a run
+- Catch regressions before committing
 
 **Output:**
-> _Fill in when done. Examples: count of linked settlements over year, any unmatched CC payments (and why), path to reconciliation module._
+
+> *Fill in when done. Example: baseline accuracy score, best-performing prompt/model, path to eval.py, score history.*
 
 ---
 
-## Block 6 — Evaluation Harness (Where financeEnv Fits)
+## Block 6B — Pattern-Enriched LLM Context (Ambiguous UPI Transactions)
 
 **Status:** ⬜ Not started
 
-**Role:** Answers "did my changes actually improve tagging?" with number. Stops iteration being guesswork.
+**Role:** Reduce the LLM fallback % for ambiguous UPI transactions (primarily auto-rickshaws and
+similar cash-substitute payments) by passing structured pattern context alongside the raw 
+description. The name alone is useless ("UPI/9876543210/PAY" tells the LLM nothing); the 
+time + amount together are strong signals.
+
+**The problem it solves:**
+Auto-rickshaws on Canara frequently appear as bare UPI payment strings with no merchant name.
+Hard-coding a rule ("₹60–150 between 7–10am = Auto") is brittle — amount ranges shift, 
+occasional evening rides break it. Instead: detect that a transaction *looks like* a pattern 
+match candidate, and pass that hypothesis to the LLM as context. The LLM then confirms or 
+overrides based on the full picture.
 
 **What to do:**
-- Freeze snapshot of corrected year of data → ground truth.
-- Feed into financeEnv-style task:
-  - Input: raw transactions.
-  - Expected output: your labels.
-- Every prompt change, model swap (llama3 → qwen → Haiku), or decision tree tweak → run harness → compare scores.
-- Track scores over time; catch regression if change makes things worse.
+
+- Build a `PatternMatcher` class in `core/pattern_matcher.py`
+- It runs *before* the LLM fallback step in the categorization decision tree (between YAML rules
+  and LLM — new step 5B)
+- For each transaction that reaches fallback, `PatternMatcher` checks:
+  1. **Amount range match:** does the amount fall within a known range for a category?
+  2. **Time-of-day match:** does the transaction time fall in a known window?
+  3. **Source account match:** some patterns only make sense on specific accounts
+  4. **Recurrence signal:** has a similar (amount ± ₹20, same time window) transaction appeared 
+     3+ times before and been tagged consistently?
+- If pattern fires → pass a `pattern_hint` string to the LLM prompt instead of calling it blind
+
+**Updated LLM prompt when pattern fires:**
+
+```python
+# Instead of:
+prompt = f"Categorize this transaction: '{raw_description}' for ₹{amount}"
+
+# Pass:
+prompt = f"""Categorize this transaction: '{raw_description}' for ₹{amount} at {time}.
+
+Pattern hint: This matches a recurring pattern — {pattern_hint}.
+Examples of similar past transactions tagged as {suggested_category}:
+{similar_examples}  # 2-3 rows from corrections DB with same time+amount window
+
+Does this match {suggested_category}? If yes, confirm. If not, suggest the correct category."""
+```
+
+**Seed patterns to start with (add more as you discover them):**
+
+```yaml
+# config/patterns.yaml
+patterns:
+  - id: auto_morning
+    label: "Morning auto ride"
+    category: Fuel & Transport
+    canonical_merchant: Auto Rickshaw
+    source_accounts: [acc_canara_daily, cc_hdfc_moneyback, cc_hdfc_tataneu]
+    amount_range: [50, 200]
+    time_window: ["06:30", "10:30"]
+    min_occurrences: 3          # only activate after seen 3+ times
+    confidence: 0.75            # hint confidence — LLM still makes final call
+
+  - id: auto_evening
+    label: "Evening auto ride"
+    category: Fuel & Transport
+    canonical_merchant: Auto Rickshaw
+    source_accounts: [acc_canara_daily, cc_hdfc_moneyback, cc_hdfc_tataneu]
+    amount_range: [50, 200]
+    time_window: ["17:00", "22:00"]
+    min_occurrences: 3
+    confidence: 0.75
+```
+
+**Updated categorization decision tree (revised step 5):**
+
+is_internal_transfer flag           → Internal Transfer (1.0)
+Corrections DB lookup               → cached category (0.80–0.95)
+Contact match (alias + VCF)         → Other + splitwise_candidate=1 (0.90–0.95)
+SBI raw pattern rules               → category (0.90)
+YAML keyword rules                  → category (0.80)
+5B. PatternMatcher                     → pattern_hint passed to LLM (0.75 hint only)
+LLM fallback (with or without hint) → category
+"Other" fallback                    → review queue (0.0)
+
+
+**Important constraint:** PatternMatcher never assigns a category directly — it only enriches
+the LLM prompt. The LLM still makes the call. This avoids the brittleness of hard rules while 
+giving the LLM enough context to stop guessing.
+
+**When to build this:**
+After Block 6 (eval harness) is done — the eval harness gives you a before/after accuracy score
+so you can measure whether this actually moves the needle on Canara's ~37% fallback rate.
+If Canara's fallback drops below 15% after corrections DB seeding alone (from loading 12 months 
+of CC + bank statements), skip this block — it may not be needed.
 
 **Output:**
-> _Fill in when done. Examples: baseline accuracy score, best-performing prompt/model combo, path to eval script, history of score changes per iteration._
+
+> *Fill in when done. Canara fallback % before and after, patterns file path, any patterns that 
+> fired unexpectedly (false positives to tune).*
 
 ---
 
-## The Big-Picture Flow
+## Block 7 — Monthly Spend Report
+
+**Status:** ✅ Done
+
+**Pre-condition:** Block 5 (CC reconciliation) and Block 5B (re-upload dedup) must be done first. Totals are wrong otherwise.
+
+**Role:** Core output of Phase 2. Single command, readable summary of the month — what was spent, where, vs. last month, vs. budget.
+
+**What to do:**
+
+- `report.py --month YYYY-MM` outputs:
+  - Category totals (genuine spend only — excludes `cc_settlement`, `internal_transfer`, `refund`)
+  - MoM delta per category (absolute ₹ + %)
+  - Top 5 merchants by spend
+  - `Other` row count (how many rows still in review queue)
+- Output formats: terminal table (default) + `--csv` / `--excel` flags
+- Full-year view: `report.py --year YYYY`
+
+**Key query:**
+
+```sql
+SELECT category, SUM(amount) as total
+FROM transactions
+WHERE strftime('%Y-%m', date_parsed) = '2025-01'    -- requires date_parsed column (ISO format)
+  AND transaction_type = 'genuine_spend'
+GROUP BY category
+ORDER BY total DESC;
+```
+
+> Note: this requires adding `date_parsed` (ISO 8601) column alongside existing DD/MM/YYYY `date` column — needed for reliable SQLite date filtering. Add in Block 5 migration.
+
+**Output:**
+
+> **Done.** `report.py`. Commands: `uv run python report.py --month YYYY-MM` (terminal table), `--compare YYYY-MM` (explicit MoM), `--csv` / `--excel` (export), `--year YYYY` (full-year view). Filters: `transaction_type = 'genuine_spend'` + `txn_type = 'debit'` only. Shows: category totals, MoM delta, bar chart, top 5 merchants, Other review queue count. Ready to test once Block 12 data committed.
+
+---
+
+## Block 8 — Budget Tracking
+
+**Status:** ✅ Done
+
+**Role:** Compare actuals to targets per category. Surface overruns early in the month, not at month-end.
+
+**What to do:**
+
+- Add `config/budget.yaml` — monthly targets per category
+- `report.py --month YYYY-MM --budget` overlays targets on actuals
+- Flag categories where actual > 110% of budget (configurable threshold in budget.yaml)
+- Distinguish fixed vs. variable categories — different alert logic:
+  - Fixed (Rent, EMI): informational only, no alert
+  - Variable (Food, Shopping): alert on overrun
+- No rollover logic for now — each month resets
+
+**`config/budget.yaml` structure:**
+
+```yaml
+thresholds:
+  alert_pct: 110          # alert if actual > this % of budget
+  warn_pct: 90            # warn (amber) if actual > this % of budget
+
+monthly_targets:
+  Food & Dining: 8000
+  Groceries: 4000
+  Fuel & Transport: 3000
+  Entertainment & Subscriptions: 2000
+  Shopping & Apparel: 3000
+  Health & Medical: 1500
+
+fixed_categories:         # informational only, no overrun alert
+  - Rent
+  - EMI & Loan
+  - Investment & SIP
+```
+
+**Output:**
+
+> **Done.** `config/budget.yaml` + `--budget` flag on `report.py`. Variable categories get 🔴/🟡/🟢 status. Fixed categories (Rent, EMI, SIP) shown informational only. Alert summary printed at bottom if any category OVER/WARN. Thresholds: alert=110%, warn=90% (configurable in budget.yaml). Run: `uv run python report.py --month YYYY-MM --budget`.
+
+---
+
+## Block 9 — Anomaly Detection
+
+**Status:** ⬜ Skipped — not needed
+
+**Why skipped:** Banks (HDFC, ICICI, Axis, Canara) already flag anomalies and fraud in-app. Duplicate UPI retry detection has limited value given low false-negative rate from banks. Block 9 adds no splitwise signal — that comes from contact match (Block 3). May revisit if cross-bank pattern detection becomes useful in Phase 3.
+
+**Role:** Flag unusual transactions without needing budget config. Catches one-offs, duplicate charges, suspiciously large amounts.
+
+**What to do:**
+
+- Flag: amount > 3× category median for that merchant (from corrections DB history)
+- Flag: same-amount duplicate within 3-day window, same source account (UPI retry pattern)
+- Flag: new merchant (not in corrections DB) with amount > ₹2,000
+- Surface in dry-run CSV as `anomaly = 1` column — separate from category corrections
+- Anomalies = data quality / one-off signals, not budget signals. Keep separate from Block 8 alerts.
+
+**Output:**
+
+> *Fill in when done. Example: anomaly count on first run, false positive rate.*
+
+---
+
+## Block 10 — Savings & Investment Awareness
+
+**Status:** ✅ Done
+
+**Role:** Passive awareness layer — not advice. "Here's what went to SIPs vs. what you spent vs. what hit your account." Sets up Phase 3 investment reasoning.
+
+**What to do:**
+
+- Monthly summary of `Investment & SIP` category flows (from BOB SIP account)
+- Track `acc_bob_sip` outflows — sum by month, running YTD total
+- Compute indicative savings rate: `(salary_inflow - genuine_spend) / salary_inflow`
+  - Salary inflow = `CMP`-tagged transactions on SBI
+  - Genuine spend = Block 7 total
+  - Label as "indicative only" — tax, insurance, investment flows skew this
+- Surface as a section within Block 7 report, not a separate command
+
+**Output:**
+
+> **Done.** Section added to `report.py` month report (always shown, no flag needed). Shows: salary inflow (SBI `acc_sbi_salary` credits), SIP outflow + count (`acc_bob_sip` debits), SIP YTD, genuine spend, indicative savings rate with low/good marker. Labelled "indicative only — excludes tax, insurance, inter-account flows".
+
+---
+
+## Block 11 — Splitwise Reconciliation
+
+**Status:** ✅ Done
+
+**Role:** Handle the "paid full upfront, recoup later" pattern. Without this, Food & Dining / Entertainment totals are inflated on months you front group expenses.
+
+**What to do:**
+
+- `splitwise_candidate = 1` rows (from Block 3 contact match) enter a pending pool
+- `splitwise.py` CLI: review candidates, confirm split ratio (or skip)
+- Your effective share replaces full amount in spend totals for Block 7
+- Track outstanding receivables (who owes you, how much)
+- Splitwise API integration deferred to Phase 3 — manual CSV input for now
+
+**Schema addition (migration):**
+
+```sql
+ALTER TABLE transactions ADD COLUMN splitwise_confirmed INTEGER DEFAULT 0;
+ALTER TABLE transactions ADD COLUMN your_share_amount REAL;      -- NULL = full amount
+ALTER TABLE transactions ADD COLUMN splitwise_group TEXT;         -- e.g. "Goa trip Jan 2025"
+```
+
+**Output:**
+
+> **Done.** `splitwise.py` CLI + 3 DB columns (`splitwise_confirmed`, `your_share_amount`, `splitwise_group`). Commands: `pending` (list candidates), `confirm <id>` (interactive: 50/50, custom %, or fixed ₹), `dismiss <id>`, `receivables` (who owes you), `export` (CSV for manual Splitwise entry), `summary --month` (gross vs net). `report.py` category totals auto-use `your_share_amount` when split confirmed. Phase 3: Splitwise API sync.
+
+---
+
+## Block 12 — CC Statement Catchup (Ongoing Data Task)
+
+**Status:** ⬜ Not started
+
+**Role:** Phase 1 only ingested 1 month of CC statements. Block 5 reconciliation needs the matching CC statements to work. This is a data loading task, not a code task — but it needs to be tracked.
+
+**⚠️ One-time setup required for Tata Neu HDFC CC (new card — do before loading any statements):**
+1. Add to `config/accounts.yaml` — label `Tata Neu HDFC CC`, source ID `cc_hdfc_tataneu`, last 4 digits of card
+2. Add PDF password to `config/passwords.yaml` under `cc_hdfc_tataneu`
+3. Add `tataneu` (and any variant HDFC uses in the filename) as a filename keyword in `parsers/detector.py` → maps to the existing HDFC CC parser config in `parsers/base.py BANK_CONFIGS` (reuse Moneyback config)
+4. Dry-run one statement to confirm rows extract correctly before committing anything
+
+**What to do:**
+
+1. Gather all available CC statements for all 4 cards (HDFC Moneyback, Amazon ICICI, Axis Supermoney, Tata Neu HDFC)
+   - Recent months: individual monthly PDFs — name and upload as-is
+   - Older months: may be a single consolidated multi-cycle PDF from the bank — Block 5 parser handles splitting per cycle
+   - Tata Neu HDFC: only load from the month the card was activated — don't try to backfill before that
+2. Run dry-run for each file, verify row counts per cycle look right
+3. Fix any categories via dry-run review before committing
+4. Commit to DB — Block 5 reconciliation will then auto-link CC settlements on Canara and HDFC savings
+
+**Statement naming to use:**
+```
+hdfc_moneyback_jan2025.pdf, hdfc_moneyback_feb2025.pdf, ...
+amazon_icici_jan2025.pdf, ...
+axis_jan2025.pdf, ...
+tataneu_jan2025.pdf, ...        ← or hdfc_tataneu_jan2025.pdf — pick one, stay consistent
+```
+
+**Tracking table — fill in as you go (⬜ = not done, ✅ = ingested, N/A = card not active that month):**
+
+| Month | HDFC Moneyback | Amazon ICICI | Axis Supermoney | Tata Neu HDFC |
+|---|---|---|---|---|
+| 2025-01 | ⬜ | ⬜ | ⬜ | N/A |
+| 2025-02 | ⬜ | ⬜ | ⬜ | N/A |
+| 2025-03 | ⬜ | ⬜ | ⬜ | N/A |
+| 2025-04 | ⬜ | ⬜ | ⬜ | N/A |
+| 2025-05 | ⬜ | ⬜ | ⬜ | N/A |
+| 2025-06 | ⬜ | ⬜ | ⬜ | N/A |
+| 2025-07 | ⬜ | ⬜ | ⬜ | N/A |
+| 2025-08 | ⬜ | ⬜ | ⬜ | N/A |
+| 2025-09 | ⬜ | ⬜ | ⬜ | N/A |
+| 2025-10 | ⬜ | ⬜ | ⬜ | N/A |
+| 2025-11 | ⬜ | ⬜ | ⬜ | N/A |
+| 2025-12 | ⬜ | ⬜ | ⬜ | N/A |
+| 2026-01 | ⬜ | ⬜ | ⬜ | ⬜ |
+| 2026-02 | ⬜ | ⬜ | ⬜ | ⬜ |
+| 2026-03 | ⬜ | ⬜ | ⬜ | ⬜ |
+| 2026-04 | ⬜ | ⬜ | ⬜ | ⬜ |
+
+> Update Tata Neu HDFC column: replace `N/A` with `⬜` from the month you activated the card. Once Block 5B (re-upload dedup) is done, re-uploading any month will be safe — it will skip or warn instead of duplicating.
+
+**Output:**
+
+> *Fill in as you go — update table above. Note any months where extraction had issues or consolidated docs were used.*
+
+---
+
+## Phase 2 Execution Order
+
+Do these in sequence — each block depends on the previous:
 
 ```
-Statement files (PDF/Excel)
-        │
-   [Block 1] Extract + validate rows
-        │
-   [Block 0] Clean descriptions → canonical_merchant
-        │
-   [Block 3] Categorization pipeline
-        │   ├─ internal transfer check
-        │   ├─ contact/Splitwise check
-        │   ├─ corrections DB lookup     ◄── reads from [Block 2]
-        │   ├─ time/amount rules
-        │   ├─ bank category as hint
-        │   └─ LLM + few-shot            ◄── reads from [Block 2]
-        │
-   [Block 5] Reconcile across sources
-        │
-   [Block 4] Dry-run Excel → you correct → re-import
-        │                         │
-        │                         └──► updates [Block 2] corrections DB
-        │
-   Final DB state
-        │
-   [Block 6] Eval harness measures accuracy → informs next iteration
+[Block 5B] Re-upload dedup          ← data integrity, do first
+      │
+[Block 5]  CC reconciliation        ← spend totals are wrong until this is done
+      │
+[Block 12] CC statement catchup     ← load all 2025 CC data so Block 5 has something to match
+      │
+[Block 6]  Eval harness             ← freeze ground truth before adding more data
+      │
+[Block 7]  Monthly spend report     ← first real Phase 2 output
+      │
+[Block 8]  Budget tracking          ← overlay targets on Block 7 output
+      │
+[Block 9]  Anomaly detection        ← flag issues in dry-run before they hit DB
+      │
+[Block 10] Savings awareness        ← add section to Block 7 report
+      │
+[Block 11] Splitwise reconciliation ← last because it needs contact match (Phase 1) + spend report (Block 7)
 ```
 
 ---
 
 ## Working Notes
 
-> _Scratchpad for things learned as you go — prompt tweaks, weird edge cases, merchant aliases, ideas for Phase 2._
+> *Scratchpad — add discoveries, edge cases, prompt tweaks as you go.*
 
-### Accounts & Transfers
-- BOB joint account — my share = sum of my outflows to that account. Dad's contributions don't appear in my statements.
-- All three CCs (HDFC Millennia, Amazon ICICI, Axis SuperMoney) pay from `acc_canara_daily`.
-- NEFT/IMPS keyword too broad for internal transfer detection — contact match + alias file handles this now. BOB joint account = Savings & Investment, not family transfer.
+### Ongoing data tasks to stay on top of
+- Download CC statements monthly (all 4 cards now: HDFC Moneyback, Amazon ICICI, Axis Supermoney, Tata Neu HDFC) — name per convention, run dry-run before committing
+- Re-export `contacts/contacts.vcf` when you add/rename contacts in phone
+- Add new aliases to `config/contact_aliases.yaml` whenever a dry-run shows an unknown person payment
 
-### Contact Matching (added 2026-04-27)
-- Phone contacts exported to `contacts/contacts.vcf` (238 contacts). Re-export when contacts change.
-- Core problem: contacts saved as nicknames (Amma, Dad) but bank shows legal names (Karkala Roopa Pai, Karkala Suresh Pai) truncated to 8–10 chars. String matching alone can't bridge this.
-- Solution: two-layer matching — alias file (exact, high priority) + VCF fuzzy match (token/ratio, lower priority).
-- Alias file (`config/contact_aliases.yaml`) grows incrementally: when dry-run shows unknown person merchant, add one line. No need to pre-populate exhaustively.
-- Confirmed working: "Karkala Su" / "Suresh Pa" → Suresh pai (dad). "Roma Pa" → Roma Pai (self).
-- Mom's bank name variant not yet added to aliases — add when it appears in statement.
-- Contact match → `splitwise_candidate = 1` + category `Other` (review queue). User corrects via Block 4; correction caches merchant for future runs.
-
-### CC Payments & Reconciliation (Block 5)
-- CRED splits into: **Cred Club** = CC bill payment (reconcile as CC Settlement), **Cred Store** = purchase (genuine spend), **Cred Rent** = rent payment (tag as Rent). Pattern must be specific to `\bcred\s*club\b`.
-- Bare "HDFC" in UPI raw description is NOT CC payment signal — it's PSP bank in VPAs like `**.bdsi@hdfcbank`, and transaction hashes like `HDF...CC...3FE` can false-match `hdfcbank.*cc`. CC payment patterns must require "credit card" / "cc bill" / card name explicitly.
-- Dates stored in DB as DD/MM/YYYY — SQLite string comparison breaks for date range queries. Always filter in Python using `_parse_date()`.
-- 9 CRED Club CC payments on Canara for 2025 (Jan–Oct, ₹12K–₹60K). 0 matched on first run — 2025 CC statements not in DB yet. Will auto-match once loaded.
-- ₹60,249 on 25/03/2025 (Cred Club) unusually large — likely paid multiple CCs in one CRED transaction. May not match any single CC's monthly total; flag for manual split if needed.
-- BBPS = payment rail not merchant. Tag as Utilities & Bills by default. Sub-biller detail not available from bank statements — enrich from biller apps in Phase 2. Large BBPS near CC due date = possible CC settlement (secondary signal, lower confidence than Cred Club).
-
-### Block 4 Workflow
-- Two distinct flows: `main.py --dry-run` → `import_corrections.py --save` (fresh month, pre-insert INSERT flow). `review.py export` → `review.py apply --save` (retroactive fix, post-insert UPDATE flow).
-- `import_corrections.py` does INSERT only. `review.py apply` does UPDATE only. Never mix the two.
-- Dry-run CSV sorted: Other first → ascending confidence → date. Worst rows at top = fix fastest.
+### Things to NOT forget
+- `--dry-run` → `import_corrections.py --save` for fresh months (INSERT flow)
+- `review.py export` → `review.py apply --save` for retroactive fixes (UPDATE flow)
+- Never commit `config/passwords.yaml`, `data/db/finance.db`, or `dry_run_*.csv`
 
 ---
 
-## Next Phase (placeholder)
+---
 
-Phase 2 — Insights & Advice: budget planning, savings recommendations, investment suggestions. Not started until Phase 1 "Done" criteria met.
+## Phase 3 Placeholder — UI, Dashboard & Natural Language Q&A
 
-## Phase 3 (Future — multi-agent advisory system)
+**Status:** ⬜ Not started — start after Phase 2 "Done" criteria are met.
 
-**Status:** ⬜ Not started
+**What goes here:** This is the phase where you stop running CLI commands and start interacting with your data through a proper interface. Three components:
 
-**Role:** Once Phase 1 & 2 stable, build specialized agents:
-- Categorization Agent (debate-based)
-- Reconciliation Agent
-- Budget Planning Agent
-- Tax Optimization Agent
-- Investment Advisor Agent
-- Coordinator (orchestrates, synthesizes)
+**Component A — Dashboard (read-only, visual)**
+- Monthly spend by category (bar/donut chart)
+- MoM trend lines per category
+- Budget vs actual gauges (from Block 8)
+- Savings rate over time (from Block 10)
+- Outstanding Splitwise receivables (from Block 11)
+- Tech choice: local web app (Flask/FastAPI + simple HTML) or Streamlit — decide when you get here
 
-**Why later, not now:** Multi-agent adds complexity. Value shows up when you have enough data (12+ months clean history) and independent problems to solve. Phase 1-2 better as clean pipeline.
+**Component B — Natural language Q&A over your DB**
+- Ask questions in plain English: "How much did I spend on food in March?", "Which month had the highest shopping spend?", "What's my average monthly Zomato bill?"
+- Answer comes from the DB — not from Claude's memory
+- Implementation: Claude API (claude-sonnet) with function calling / tool use. Claude interprets the question, generates the SQL query, runs it against `finance.db`, returns the answer in plain English
+- Queries must respect `transaction_type = 'genuine_spend'` filter automatically — never return raw totals that include internal transfers
 
-**Output:**
-> _To be filled in later._
+**Component C — Splitwise transaction management UI**
+- Surface all `splitwise_candidate = 1` rows in a simple table
+- For each: confirm split ratio, assign to a group (e.g. "Goa trip"), or dismiss
+- Show outstanding receivables grouped by person
+- This replaces the `splitwise.py` CLI from Block 11 — same data, better UX
+- Optional: Splitwise API sync (pull settlements from Splitwise app to auto-close receivables)
+
+> Phase 3 plan will be written in `claude_phase_3.md` when Phase 2 is complete.
+
+---
+
+## Phase 4 Placeholder — Multi-Agent Advisory System
+
+**Status:** ⬜ Not started — do not start until Phase 3 is stable and 12+ months of clean data exists.
+
+**Why this late:** Multi-agent adds significant complexity. Payoff only shows up with enough clean history (12+ months) and independent sub-problems to solve. Agents planned: Categorization, Reconciliation, Budget Planning, Spend Pattern, Tax Awareness, Investment Advisor, Coordinator.
+
+> Phase 4 plan will be written in `claude_phase_4.md` when Phase 3 is complete.
