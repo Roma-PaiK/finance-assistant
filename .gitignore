@@ -7,6 +7,8 @@ data_preview/
 data_corrections/
 contacts/
 *.db
+*.log
+*.txt
 dry_run_*.csv
 review_*.csv
 

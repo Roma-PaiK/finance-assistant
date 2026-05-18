@@ -11,6 +11,8 @@ dry_runs/
 *.csv
 contacts/
 *.original.md
+*.log
+*.txt
 
 # Database
 *.db
