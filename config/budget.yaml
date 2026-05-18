@@ -1,0 +1,27 @@
+# Block 8 — Monthly budget targets
+# Edit monthly_targets to match your actual spending goals.
+# fixed_categories: informational only — no overrun alerts.
+
+thresholds:
+  alert_pct: 110   # alert (red)  if actual > this % of budget
+  warn_pct:  90    # warn  (amber) if actual > this % of budget
+
+monthly_targets:
+  Food & Dining:                    8000
+  Groceries:                        4000
+  Fuel & Transport:                 3000
+  Entertainment & Subscriptions:    2000
+  Shopping & Apparel:               3000
+  Health & Medical:                 1500
+  Utilities & Bills:                2000
+  Education:                        1000
+
+fixed_categories:
+  - Rent
+  - EMI & Loan
+  - Investment & SIP
+  - Credit Card Payment
+  - Internal Transfer
+  - Internal Transfer — Self
+  - Internal Transfer — Other
+  - ATM & Cash
