@@ -5,7 +5,7 @@ All transactions are stored here after parsing + categorization.
 
 import sqlite3
 import os
-from datetime import date
+from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "db", "finance.db")
 
@@ -76,17 +76,144 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_recon_savings ON reconciliation_links(savings_txn_id);
         CREATE INDEX IF NOT EXISTS idx_recon_cc ON reconciliation_links(cc_source_id, cc_month);
+
+        -- Block 5B: tracks ingested statement periods to prevent re-upload duplicates
+        CREATE TABLE IF NOT EXISTS statement_log (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_account TEXT NOT NULL,
+            period_start   TEXT NOT NULL,   -- DD/MM/YYYY (earliest date in file)
+            period_end     TEXT NOT NULL,   -- DD/MM/YYYY (latest date in file)
+            file_hash      TEXT NOT NULL,   -- SHA256 of file bytes
+            ingested_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            row_count      INTEGER,
+            UNIQUE(source_account, period_start, period_end)
+        );
     """)
-    # Migration: add columns for existing DBs that predate Block 3
+    # Migrations: add columns for existing DBs
     for col, ddl in [
-        ("category_source", "TEXT"),
-        ("confidence",       "REAL DEFAULT 0"),
+        ("category_source",    "TEXT"),
+        ("confidence",         "REAL DEFAULT 0"),
+        # Block 5 (Phase 2): transaction classification + linking
+        ("transaction_type",   "TEXT DEFAULT 'genuine_spend'"),
+        ("linked_statement_id","INTEGER"),
+        ("date_parsed",        "TEXT"),      # ISO 8601 (YYYY-MM-DD) for SQL date filtering
+        # Block 11 (Phase 2): Splitwise local tracking
+        ("splitwise_confirmed", "INTEGER DEFAULT 0"),
+        ("your_share_amount",   "REAL"),     # NULL = full amount is yours; set after confirm
+        ("splitwise_group",     "TEXT"),     # e.g. "Goa trip Jan 2025"
     ]:
         try:
             conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {ddl}")
             conn.commit()
         except Exception:
             pass  # column already exists
+    conn.commit()
+    _backfill_date_parsed(conn)
+    _backfill_transaction_type(conn)
+    conn.close()
+
+
+def _parse_date_to_iso(date_str: str) -> str | None:
+    """Convert DD/MM/YYYY (or YYYY-MM-DD) → ISO YYYY-MM-DD for SQL date filtering."""
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y"):
+        try:
+            return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
+def _backfill_date_parsed(conn: sqlite3.Connection):
+    """One-time migration: populate date_parsed for existing rows that have it null."""
+    rows = conn.execute(
+        "SELECT id, date FROM transactions WHERE date_parsed IS NULL"
+    ).fetchall()
+    for row in rows:
+        iso = _parse_date_to_iso(row["date"])
+        if iso:
+            conn.execute("UPDATE transactions SET date_parsed = ? WHERE id = ?", (iso, row["id"]))
+    conn.commit()
+
+
+def _backfill_transaction_type(conn: sqlite3.Connection):
+    """One-time migration: set transaction_type for rows that still have NULL."""
+    conn.execute("""
+        UPDATE transactions
+        SET transaction_type = 'internal_transfer'
+        WHERE is_internal_transfer = 1 AND (transaction_type IS NULL OR transaction_type = 'genuine_spend')
+    """)
+    conn.execute("""
+        UPDATE transactions
+        SET transaction_type = 'genuine_spend'
+        WHERE transaction_type IS NULL
+    """)
+    conn.commit()
+
+
+# ── Statement log (Block 5B) ─────────────────────────────────────────────────
+
+def check_statement_log(source_account: str, period_start: str, period_end: str) -> dict | None:
+    """Return existing statement_log entry for this period, or None."""
+    conn = get_connection()
+    row = conn.execute(
+        """SELECT * FROM statement_log
+           WHERE source_account = ? AND period_start = ? AND period_end = ?""",
+        (source_account, period_start, period_end)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def add_statement_log(source_account: str, period_start: str, period_end: str,
+                      file_hash: str, row_count: int):
+    """Record a successfully ingested statement period."""
+    conn = get_connection()
+    conn.execute(
+        """INSERT OR REPLACE INTO statement_log
+           (source_account, period_start, period_end, file_hash, ingested_at, row_count)
+           VALUES (?, ?, ?, ?, datetime('now'), ?)""",
+        (source_account, period_start, period_end, file_hash, row_count)
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_statement_period(source_account: str, period_start: str, period_end: str):
+    """
+    --force: delete all transactions for source_account in [period_start, period_end].
+    Also removes the statement_log entry so re-insert can proceed cleanly.
+    """
+    start_iso = _parse_date_to_iso(period_start)
+    end_iso   = _parse_date_to_iso(period_end)
+    conn = get_connection()
+
+    if start_iso and end_iso:
+        conn.execute(
+            """DELETE FROM transactions
+               WHERE source_id = ?
+                 AND date_parsed BETWEEN ? AND ?""",
+            (source_account, start_iso, end_iso)
+        )
+    else:
+        # Fallback: parse in Python (handles legacy rows without date_parsed)
+        rows = conn.execute(
+            "SELECT id, date FROM transactions WHERE source_id = ?",
+            (source_account,)
+        ).fetchall()
+        start_dt = _parse_date_to_iso(period_start)
+        end_dt   = _parse_date_to_iso(period_end)
+        ids = [
+            r["id"] for r in rows
+            if start_dt <= (_parse_date_to_iso(r["date"]) or "") <= end_dt
+        ]
+        if ids:
+            conn.execute(f"DELETE FROM transactions WHERE id IN ({','.join('?'*len(ids))})", ids)
+
+    conn.execute(
+        """DELETE FROM statement_log
+           WHERE source_account = ? AND period_start = ? AND period_end = ?""",
+        (source_account, period_start, period_end)
+    )
     conn.commit()
     conn.close()
 
@@ -97,21 +224,28 @@ def insert_transactions(transactions: list[dict]) -> int:
     inserted = 0
     for txn in transactions:
         try:
+            is_transfer = int(txn.get("is_internal_transfer", 0))
+            txn_type = txn.get("transaction_type") or (
+                "internal_transfer" if is_transfer else "genuine_spend"
+            )
+            date_parsed = _parse_date_to_iso(txn.get("date", ""))
             conn.execute("""
                 INSERT INTO transactions
                 (date, month, description, raw_description, canonical_merchant,
                  amount, txn_type, source_id, source_label, category,
                  category_source, confidence,
-                 is_internal_transfer, splitwise_candidate, splitwise_pushed, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 is_internal_transfer, splitwise_candidate, splitwise_pushed, notes,
+                 transaction_type, date_parsed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 txn["date"], txn["month"], txn["description"], txn["raw_description"],
                 txn.get("canonical_merchant", ""),
                 txn["amount"], txn["txn_type"], txn["source_id"], txn["source_label"],
                 txn["category"], txn.get("category_source"), txn.get("confidence", 0.0),
-                int(txn["is_internal_transfer"]),
-                int(txn["splitwise_candidate"]), int(txn["splitwise_pushed"]),
-                txn.get("notes", "")
+                is_transfer,
+                int(txn.get("splitwise_candidate", 0)), int(txn.get("splitwise_pushed", 0)),
+                txn.get("notes", ""),
+                txn_type, date_parsed
             ))
             inserted += 1
         except sqlite3.IntegrityError:
@@ -140,6 +274,62 @@ def update_splitwise_pushed(txn_id: int):
     conn.execute("UPDATE transactions SET splitwise_pushed = 1 WHERE id = ?", (txn_id,))
     conn.commit()
     conn.close()
+
+
+def confirm_split(txn_id: int, your_share: float, group: str | None = None):
+    """Mark a splitwise_candidate as confirmed with your share amount."""
+    conn = get_connection()
+    conn.execute(
+        """UPDATE transactions
+           SET splitwise_confirmed = 1, your_share_amount = ?, splitwise_group = ?
+           WHERE id = ?""",
+        (your_share, group, txn_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def dismiss_splitwise(txn_id: int):
+    """Mark a candidate as dismissed (full amount is yours, not a split)."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE transactions SET splitwise_candidate = 0 WHERE id = ?",
+        (txn_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_splitwise_candidates(month: str | None = None) -> list[dict]:
+    """Return unconfirmed splitwise candidates, optionally filtered by month."""
+    where = "WHERE splitwise_candidate = 1 AND splitwise_confirmed = 0"
+    params: tuple = ()
+    if month:
+        where += " AND month = ?"
+        params = (month,)
+    rows = query(
+        f"""SELECT id, date, month, description, canonical_merchant,
+                   amount, category, source_label, splitwise_group, notes
+            FROM transactions
+            {where}
+            ORDER BY date DESC""",
+        params
+    )
+    return rows
+
+
+def get_splitwise_receivables() -> list[dict]:
+    """Return confirmed splits where you're owed money (amount > your_share_amount)."""
+    rows = query(
+        """SELECT id, date, month, description, canonical_merchant,
+                  amount, your_share_amount, splitwise_group, category
+           FROM transactions
+           WHERE splitwise_confirmed = 1
+             AND your_share_amount IS NOT NULL
+             AND your_share_amount < amount
+           ORDER BY date DESC"""
+    )
+    return rows
 
 
 def log_upload(filename: str, source_id: str, month: str, txn_count: int):
