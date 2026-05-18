@@ -48,6 +48,7 @@ def validate_balance(
     opening_balance: Optional[float],
     closing_balance: Optional[float],
     source_file: str,
+    source_id: str = "",
 ) -> ParseValidation:
     """
     Core balance-math check for savings accounts.
@@ -72,6 +73,15 @@ def validate_balance(
             row_count=row_count,
             status="warn",
             message="Opening/closing balance not found in metadata — balance check skipped.",
+        )
+
+    # CC statements don't follow bank balance equation (payment rows absent from file)
+    if source_id.startswith("cc_"):
+        return ParseValidation(
+            source_file=source_file,
+            row_count=row_count,
+            status="warn",
+            message="Credit card statement — balance check skipped (CC uses different equation).",
         )
 
     debits  = sum(t.amount for t in transactions if t.txn_type == "debit")

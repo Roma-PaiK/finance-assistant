@@ -34,8 +34,8 @@ def get_parser_and_password(file_path: str) -> tuple[SmartParser, str]:
     accounts_cfg, passwords_cfg = load_config()
     pwd_map = passwords_cfg.get("pdf_passwords", {})
 
-    # Credit cards before banks so hdfc_cc matches before hdfc_bank
-    ordered_keys = ["hdfc_cc", "icici_cc", "axis_cc", "sbi", "hdfc_bank", "bob", "canara"]
+    # Credit cards before banks; tataneu_cc before hdfc_cc (both match "hdfc" filenames)
+    ordered_keys = ["tataneu_cc", "hdfc_cc", "icici_cc", "axis_cc", "sbi", "hdfc_bank", "bob", "canara"]
 
     for key in ordered_keys:
         cfg = BANK_CONFIGS[key]

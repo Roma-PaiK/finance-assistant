@@ -118,17 +118,39 @@ BANK_CONFIGS = {
     },
 
     # ── Credit cards ───────────────────────────────────────────────────────────
+    "tataneu_cc": {
+        # Must be checked before hdfc_cc — tataneu files also contain "hdfc"
+        # Standard naming: tataneu_YYYYMM.{ext}
+        "detect_keywords": ["tataneu", "tata_neu", "tata-neu"],
+        "password_key": "hdfc_cc",     # reuse same password key as HDFC Moneyback
+        "account_id": "cc_hdfc_tataneu",
+        "date_formats": [
+            "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",  # tilde CSV includes time
+            "%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d/%m/%y", "%d %b '%y",
+        ],
+        "date_cols":      ["date", "transaction date"],
+        "desc_cols":      ["description", "narration", "particulars", "merchant", "details"],
+        "amount_cols":    ["amt", "amount", "transaction amount"],
+        "debit_cols":     ["debit", "dr"],
+        "credit_cols":    ["credit", "cr"],
+        "direction_cols": ["debit / credit", "dr/cr"],  # tilde CSV direction indicator
+    },
     "hdfc_cc": {
-        "detect_keywords": ["hdfc"],
-        "detect_require":  ["moneyback", "cc", "credit"],   # must match one of these
+        # Matches HDFC Moneyback PDFs AND tilde-delimited billing CSVs (Billedstatements_9560)
+        "detect_keywords": ["hdfc", "billedstatements"],
+        "detect_require":  ["moneyback", "cc", "credit", "9560"],  # one of these must match
         "password_key": "hdfc_cc",
         "account_id": "cc_hdfc_moneyback",
-        "date_formats": ["%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d/%m/%y", "%d %b '%y"],
-        "date_cols":   ["date", "transaction date"],
-        "desc_cols":   ["description", "narration", "particulars", "merchant", "details"],
-        "amount_cols": ["amount", "transaction amount"],    # single amount col with Cr/Dr suffix
-        "debit_cols":  ["debit", "dr"],
-        "credit_cols": ["credit", "cr"],
+        "date_formats": [
+            "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",  # tilde CSV includes time
+            "%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d/%m/%y", "%d %b '%y",
+        ],
+        "date_cols":      ["date", "transaction date"],
+        "desc_cols":      ["description", "narration", "particulars", "merchant", "details"],
+        "amount_cols":    ["amt", "amount", "transaction amount"],  # tilde CSV uses "AMT"
+        "debit_cols":     ["debit", "dr"],
+        "credit_cols":    ["credit", "cr"],
+        "direction_cols": ["debit / credit", "dr/cr"],  # tilde CSV direction indicator
     },
     "icici_cc": {
         "detect_keywords": ["icici", "amazon"],
@@ -139,9 +161,12 @@ BANK_CONFIGS = {
         "desc_cols":   ["transaction details", "description", "narration", "merchant", "details"],
         # "amount (in`)" must come before generic "amount" to avoid matching
         # the "Intl.# amount" (reward points) column first
-        "amount_cols": ["amount (in", "amount (in₹", "transaction amount", "amount"],
+        # "amount(in" (no space) covers CSV variant "Amount(in Rs)"
+        "amount_cols": ["amount (in", "amount(in", "amount (in₹", "transaction amount", "amount"],
         "debit_cols":  ["debit", "dr"],
         "credit_cols": ["credit", "cr"],
+        # CSV: direction is in "BillingAmountSign" col — "" = debit, "CR" = credit
+        "direction_cols": ["billingamountsign", "billing amount sign"],
         # ICICI CC PDFs render most transactions as plain text, not table elements.
         # pdfplumber extract_tables() only finds a fraction. Use text extraction instead.
         # Also: ICICI puts "CR" on ALL amounts (even charges) so direction is determined
@@ -152,12 +177,13 @@ BANK_CONFIGS = {
         "detect_keywords": ["axis", "supermoney"],
         "password_key": "axis_cc",
         "account_id": "cc_supermoney_axis",
-        "date_formats": ["%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d %b %y"],
-        "date_cols":   ["date", "txn date", "transaction date"],
-        "desc_cols":   ["transaction details", "description", "narration", "merchant", "particulars", "details"],
-        "amount_cols": ["amount (rs.", "amount (rs)", "amount", "transaction amount"],
-        "debit_cols":  ["debit", "dr"],
-        "credit_cols": ["credit", "cr"],
+        "date_formats": ["%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d %b '%y", "%d %b %y"],
+        "date_cols":      ["date", "txn date", "transaction date"],
+        "desc_cols":      ["transaction details", "description", "narration", "merchant", "particulars", "details"],
+        "amount_cols":    ["amount (inr)", "amount (rs.", "amount (rs)", "amount", "transaction amount"],
+        "debit_cols":     ["debit", "dr"],
+        "credit_cols":    ["credit", "cr"],
+        "direction_cols": ["debit/credit", "debit / credit", "dr/cr"],
     },
 }
 
@@ -214,12 +240,12 @@ class SmartParser:
 
         if df is None or df.empty:
             print(f"   ⚠️  No data extracted from {fname}")
-            validation = validate_balance([], None, None, fname)
+            validation = validate_balance([], None, None, fname, source_id=self.source_id)
             return ParseResult(transactions=[], validation=validation)
 
         print(f"   📥 Raw file content: {len(df)} rows read")
         transactions, opening, closing = self._extract_transactions(df)
-        validation = validate_balance(transactions, opening, closing, fname)
+        validation = validate_balance(transactions, opening, closing, fname, source_id=self.source_id)
         print(f"   {validation.summary()}")
         return ParseResult(transactions=transactions, validation=validation)
 
@@ -272,19 +298,27 @@ class SmartParser:
     def _read_csv(self, path: str) -> Optional[pd.DataFrame]:
         """Read CSV bank statement, preserving all rows.
 
-        Problem: Indian bank CSVs mix two tricky formats:
-          - Amounts like 15,000.00 (unquoted, thousand-separator comma)
-          - Descriptions like "UPI/DR/..." (quoted, may contain commas internally)
-        pandas read_csv drops rows when column count mismatches.
+        Handles two common Indian bank CSV quirks:
+          - Amounts like 15,000.00 (thousand-separator comma mixed with field delimiter)
+          - HDFC CC tilde-delimited files (Billedstatements_XXXX.csv use ~ not ,)
 
-        Solution: use Python's csv.reader (handles quoted fields correctly),
-        read all rows, find the header row, let _extract_transactions do the rest.
+        Solution: auto-detect delimiter, use Python's csv.reader (handles quoted fields),
+        find the header row, let _extract_transactions do the rest.
         """
         import csv as _csv
         try:
             with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                reader = _csv.reader(f)
-                rows = list(reader)
+                content = f.read()
+
+            if not content.strip():
+                return None
+
+            # Auto-detect delimiter: compare tilde vs comma density in first 20 lines
+            sample_lines = [l for l in content.split('\n') if l.strip()][:20]
+            sample = '\n'.join(sample_lines)
+            delimiter = '~' if sample.count('~') > sample.count(',') else ','
+
+            rows = list(_csv.reader(content.splitlines(), delimiter=delimiter))
 
             if not rows:
                 return None
@@ -292,7 +326,7 @@ class SmartParser:
             # Find header row: first row with 2+ header keywords
             header_idx = None
             for i, row in enumerate(rows):
-                row_text = ",".join(row).lower()
+                row_text = " ".join(row).lower()
                 hits = sum(1 for kw in ALL_HEADER_KEYWORDS if kw in row_text)
                 if hits >= 2:
                     header_idx = i
@@ -592,11 +626,12 @@ class SmartParser:
         print(f"   📋 Table extracted: {len(df)} data rows")
 
         # 4. Find which actual column names match our config
-        date_col   = self._match_col(df, self.cfg["date_cols"])
-        desc_col   = self._match_col(df, self.cfg["desc_cols"])
-        debit_col  = self._match_col(df, self.cfg["debit_cols"])
-        credit_col = self._match_col(df, self.cfg["credit_cols"])
-        amount_col = self._match_col(df, self.cfg.get("amount_cols", []))
+        date_col      = self._match_col(df, self.cfg["date_cols"])
+        desc_col      = self._match_col(df, self.cfg["desc_cols"])
+        debit_col     = self._match_col(df, self.cfg["debit_cols"])
+        credit_col    = self._match_col(df, self.cfg["credit_cols"])
+        amount_col    = self._match_col(df, self.cfg.get("amount_cols", []))
+        direction_col = self._match_col(df, self.cfg.get("direction_cols", []))
 
         if not date_col:
             print(f"   ⚠️  Date column not found. Columns seen: {list(df.columns)}")
@@ -605,7 +640,7 @@ class SmartParser:
             print(f"   ⚠️  Description column not found. Columns seen: {list(df.columns)}")
             return [], opening_balance, closing_balance
 
-        print(f"   Columns mapped — date:{date_col} | desc:{desc_col} | debit:{debit_col} | credit:{credit_col} | amount:{amount_col}")
+        print(f"   Columns mapped — date:{date_col} | desc:{desc_col} | debit:{debit_col} | credit:{credit_col} | amount:{amount_col} | direction:{direction_col}")
 
         # 5. Parse rows — non-date rows (filler, totals, footnotes) are skipped automatically
         transactions = []
@@ -625,13 +660,22 @@ class SmartParser:
             debit  = self._clean_amount(row.get(debit_col))  if debit_col  else 0.0
             credit = self._clean_amount(row.get(credit_col)) if credit_col else 0.0
 
-            # Credit card: single amount col with Cr/Dr suffix
+            # Single amount col: direction determined by separate column OR Cr/Dr suffix in value
             if amount_col and debit == 0 and credit == 0:
                 raw_amt = str(row.get(amount_col, ""))
-                if re.search(r'cr', raw_amt, re.IGNORECASE):
-                    credit = self._clean_amount(raw_amt)
+                if direction_col:
+                    # Explicit direction column (HDFC tilde CSV: "Debit / Credit", ICICI CSV: "BillingAmountSign")
+                    direction = str(row.get(direction_col, "")).strip().upper()
+                    if direction == "CR":
+                        credit = self._clean_amount(raw_amt)
+                    else:
+                        debit = self._clean_amount(raw_amt)
                 else:
-                    debit = self._clean_amount(raw_amt)
+                    # Fallback: check for "Cr" suffix embedded in the amount value (HDFC PDF format)
+                    if re.search(r'cr', raw_amt, re.IGNORECASE):
+                        credit = self._clean_amount(raw_amt)
+                    else:
+                        debit = self._clean_amount(raw_amt)
 
             if debit > 0:
                 transactions.append(self._make(date, desc, debit, "debit"))
