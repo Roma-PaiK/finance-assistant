@@ -5,18 +5,49 @@ Usage:
   python main.py <file>                  # parse + categorize + save to DB
   python main.py <file> --dry-run        # parse + categorize + export to CSV only (no DB write)
   python main.py <file> --dry-run --csv out.csv   # custom CSV output path
+  python main.py <file> --force          # re-import even if period already ingested (replaces rows)
 """
 
 import sys
 import os
+import hashlib
 import pandas as pd
 from parsers.detector import get_parser_and_password
 from core.categorizer import categorize_transactions
 from core.deduplicator import flag_internal_transfers, dedup_transactions
-from core.db import init_db, insert_transactions, query, log_upload
+from core.db import (
+    init_db, insert_transactions, query, log_upload,
+    check_statement_log, add_statement_log, delete_statement_period,
+)
 
 
-def process_statement(file_path: str, dry_run: bool = False, csv_path: str = None) -> dict:
+def _compute_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _get_period(txn_dicts: list[dict]) -> tuple[str, str]:
+    """Return (period_start, period_end) as DD/MM/YYYY from parsed transactions."""
+    from datetime import datetime as dt
+    dates = []
+    for t in txn_dicts:
+        raw = t.get("date", "")
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y"):
+            try:
+                dates.append(dt.strptime(raw, fmt))
+                break
+            except ValueError:
+                continue
+    if not dates:
+        return ("", "")
+    return (min(dates).strftime("%d/%m/%Y"), max(dates).strftime("%d/%m/%Y"))
+
+
+def process_statement(file_path: str, dry_run: bool = False, csv_path: str = None,
+                      force: bool = False, run_timestamp: str = None) -> dict:
     print(f"\n📄 Processing: {file_path}")
 
     # 1. Detect parser
@@ -46,24 +77,16 @@ def process_statement(file_path: str, dry_run: bool = False, csv_path: str = Non
     _flagged = sum(1 for t in txn_dicts if t.get("is_internal_transfer"))
     print(f"   🏷️  Tagging: {_flagged} internal transfers flagged | {len(txn_dicts) - _flagged} spendable rows")
 
-    # 5. Dedup against existing DB (skip in dry-run — DB may be empty/irrelevant)
-    if not dry_run:
-        existing = query("SELECT date, amount, txn_type, source_id FROM transactions")
-        before = len(txn_dicts)
-        txn_dicts = dedup_transactions(existing, txn_dicts)
-        dupes = before - len(txn_dicts)
-        if dupes:
-            print(f"   Deduped: {dupes} duplicates removed")
-
-    # 6. Categorize
+    # 5+6. Categorize (dedup against DB happens in live path only, after statement_log check)
     txn_dicts = categorize_transactions(txn_dicts)
 
     if dry_run:
-        # ── DRY RUN: export to CSV ─────────────────────────────────────────
-        from datetime import datetime as dt
-        timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
-        default_name = f"dry_run_{os.path.splitext(os.path.basename(file_path))[0]}_{timestamp}.csv"
-        out = csv_path or default_name
+        # ── DRY RUN: export to CSV inside dry_runs/<YYYYMMDD_HHMMSS>/ ─────
+        # Use shared run folder with run_timestamp so all files from one invocation land together
+        run_dir = csv_path or os.path.join("dry_runs", run_timestamp)
+        os.makedirs(run_dir, exist_ok=True)
+        default_name = os.path.join(run_dir, f"{os.path.splitext(os.path.basename(file_path))[0]}.csv")
+        out = default_name
         df = pd.DataFrame(txn_dicts)
 
         # Add blank review columns
@@ -91,7 +114,38 @@ def process_statement(file_path: str, dry_run: bool = False, csv_path: str = Non
 
     else:
         # ── LIVE RUN: save to DB ───────────────────────────────────────────
+
+        # Block 5B — statement_log dedup check
+        file_hash = _compute_sha256(file_path)
+        period_start, period_end = _get_period(txn_dicts)
+
+        if period_start and period_end:
+            existing = check_statement_log(parser.source_id, period_start, period_end)
+            if existing:
+                if existing["file_hash"] == file_hash:
+                    print(f"\n⏭️  SKIPPED — already ingested.")
+                    print(f"   Source: {parser.source_id}  Period: {period_start} → {period_end}")
+                    print(f"   Use --force to re-import.")
+                    return {"file": file_path, "parsed": len(raw_txns), "inserted": 0, "skipped": True}
+                elif not force:
+                    print(f"\n⚠️  PERIOD OVERLAP — different file hash for same period.")
+                    print(f"   Source: {parser.source_id}  Period: {period_start} → {period_end}")
+                    print(f"   Re-upload or amended statement? Use --force to replace existing rows.")
+                    return {"file": file_path, "parsed": len(raw_txns), "inserted": 0, "overlap": True}
+                else:
+                    print(f"   🔁 --force: replacing {period_start} → {period_end} for {parser.source_id}")
+                    delete_statement_period(parser.source_id, period_start, period_end)
+
+        existing_db = query("SELECT date, amount, txn_type, source_id FROM transactions")
+        before = len(txn_dicts)
+        txn_dicts = dedup_transactions(existing_db, txn_dicts)
+        dupes = before - len(txn_dicts)
+        if dupes:
+            print(f"   Deduped: {dupes} duplicates removed")
+
         inserted = insert_transactions(txn_dicts)
+        if period_start and period_end:
+            add_statement_log(parser.source_id, period_start, period_end, file_hash, inserted)
         month = txn_dicts[0]["month"] if txn_dicts else "unknown"
         log_upload(os.path.basename(file_path), parser.source_id, month, inserted)
         print(f"   ✅ Inserted {inserted} transactions into DB")
@@ -121,6 +175,7 @@ def _print_category_summary(txn_dicts: list[dict]):
 if __name__ == "__main__":
     args = sys.argv[1:]
     dry_run = "--dry-run" in args
+    force   = "--force" in args
     csv_path = None
 
     # Extract --csv <path> if provided
@@ -133,12 +188,19 @@ if __name__ == "__main__":
     files = [a for a in args if not a.startswith("--") and a != csv_path]
 
     if not files:
-        print("Usage: python main.py <statement_file> [--dry-run] [--csv output.csv]")
+        print("Usage: python main.py <statement_file> [--dry-run] [--csv output.csv] [--force]")
         sys.exit(1)
 
     if not dry_run:
         init_db()
 
+    # Generate one timestamp for this entire run session
+    if dry_run:
+        from datetime import datetime as dt
+        run_timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
+    else:
+        run_timestamp = None
+
     for path in files:
-        result = process_statement(path, dry_run=dry_run, csv_path=csv_path)
+        result = process_statement(path, dry_run=dry_run, csv_path=csv_path, force=force, run_timestamp=run_timestamp)
         print(f"\n{'📋 DRY RUN complete' if dry_run else '✅ Done'}: {result}")
