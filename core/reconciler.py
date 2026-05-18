@@ -30,11 +30,16 @@ BILLING_WINDOW_DAYS = 45
 
 # Keyword patterns per CC source_id — matched against description + raw_description on savings account
 CC_PAYMENT_PATTERNS: dict[str, list[str]] = {
-    "cc_hdfc_millenia": [
+    "cc_hdfc_moneyback": [
         # Must say "credit card" / "cc bill" / card name — NOT bare "hdfc" (appears in UPI VPAs)
-        r"hdfc\s*(credit\s*card|cc\s*bill|millennia|moneyback|moneybk)",
+        r"hdfc\s*(credit\s*card|cc\s*bill|moneyback|moneybk)",
         r"cc\s*bill.*hdfc",
         r"hdfc.*billpay.*credit",
+    ],
+    "cc_hdfc_tataneu": [
+        r"tata\s*neu",
+        r"hdfc\s*(credit\s*card|cc\s*bill|tataneu|tata\s*neu)",
+        r"cc\s*bill.*tataneu",
     ],
     "cc_amazon_icici": [
         r"icici\s*(credit\s*card|cc\s*bill)",
@@ -154,8 +159,13 @@ def reconcile_all(dry_run: bool = True) -> tuple[list[dict], list[dict]]:
     cc_ids      = {cc["id"] for cc in cc_accounts}
 
     # Find all savings-account debits that haven't already been reconciled
-    # Focus on linked_payment_account (acc_canara_daily for all CCs)
-    linked_savings = {cc.get("linked_payment_account") for cc in cc_accounts if cc.get("linked_payment_account")}
+    # Check both linked_payment_account AND secondary_payment_account (HDFC CCs can pay from HDFC savings)
+    linked_savings = set()
+    for cc in cc_accounts:
+        if cc.get("linked_payment_account"):
+            linked_savings.add(cc["linked_payment_account"])
+        if cc.get("secondary_payment_account"):
+            linked_savings.add(cc["secondary_payment_account"])
 
     savings_debits = []
     for savings_id in linked_savings:
@@ -247,6 +257,7 @@ def apply_reconciliation(matches: list[dict]) -> tuple[int, int]:
             """UPDATE transactions
                SET category = 'Internal Transfer — CC Settlement',
                    is_internal_transfer = 1,
+                   transaction_type = 'cc_settlement',
                    category_source = 'reconciler',
                    confidence = 1.0
                WHERE id = ?""",
