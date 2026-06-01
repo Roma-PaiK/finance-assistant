@@ -101,7 +101,7 @@ def process_statement(file_path: str, dry_run: bool = False, csv_path: str = Non
         # Reorder columns for readability — review cols up front
         cols = ["date", "month", "txn_type", "amount",
                 "corrected_category", "transfer_type",
-                "category", "category_source", "confidence",
+                "category", "category_source", "confidence", "transaction_type",
                 "is_internal_transfer", "description", "raw_description",
                 "canonical_merchant", "source_id", "source_label", "notes"]
         df = df[[c for c in cols if c in df.columns]]
