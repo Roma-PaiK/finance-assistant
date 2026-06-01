@@ -1,158 +1,248 @@
 # Rule-based categorization
-# Each rule: list of keywords (case-insensitive) matched against transaction description
-# First match wins. Order matters — put specific rules before generic ones.
+# Each category has:
+#   hint:     short description shown to LLM to clarify scope (optional)
+#   keywords: list of strings matched case-insensitively against transaction description
+# First keyword match wins. Order matters — put specific rules before generic ones.
+
+# Categories the LLM is NOT allowed to assign.
+# These are set only by flags (is_internal_transfer), YAML keyword rules, or contact match.
+llm_excluded:
+  - Internal Transfer
+  - Internal Transfer — Self
+  - Internal Transfer — Other
+  - Rent
+  - Credit Card Payment
+  - EMI & Loan
 
 categories:
   Food & Dining:
-    - swiggy
-    - zomato
-    - restaurant
-    - cafe
-    - pizza
-    - burger
-    - biryani
-    - hotel
-    - dhaba
-    - udupi
+    hint: "restaurants, food delivery (Swiggy/Zomato), cafes, dhabas, hospitality venues, catering"
+    keywords:
+      - swiggy
+      - zomato
+      - restaurant
+      - cafe
+      - pizza
+      - burger
+      - biryani
+      - hotel
+      - dhaba
+      - udupi
+      - district dining
+      - district d
+      - eatsure
+      - eatclub
+      - fruit stall
+      - tonique
+      - kokoscoop
+      - tassels
 
   Groceries:
-    - bigbasket
-    - innovative retail
-    - blinkit
-    - grofers
-    - dmart
-    - reliance fresh
-    - more supermarket
-    - supermarket
-    - grocery
-    - vegetables
-    - zepto
+    hint: "supermarkets, BigBasket, Blinkit, Zepto, vegetable vendors"
+    keywords:
+      - bigbasket
+      - innovative retail
+      - innovativeretail
+      - blinkit
+      - grofers
+      - dmart
+      - reliance fresh
+      - more supermarket
+      - supermarket
+      - grocery
+      - amazon grocer
+      - grocer
+      - vegetables
+      - zepto
+      - fresh
+      - starquik
+      - bbnow
+      - prime mart
 
   Shopping & Apparel:
-    - amazon
-    - flipkart
-    - myntra
-    - ajio
-    - meesho
-    - nykaa
-    - snapdeal
-    - salon
-    - haircut
-    - parlour
-    - grooming
-    - skincare
+    hint: "retail stores, clothing, home goods stores, online shopping (Amazon/Flipkart), stationery shops, bookstores, perfume/fragrance brands, e-commerce merchants"
+    keywords:
+      - amazon
+      - flipkart
+      - myntra
+      - ajio
+      - meesho
+      - nykaa
+      - snapdeal
+      - salon
+      - haircut
+      - parlour
+      - grooming
+      - skincare
+      - chumbak
+      - superdry
+      - max fashion
+      - cred store
+      - lenskart
+      - delhivery
+      - stationers
+      - stationery
 
   Fuel & Transport:
-    - petrol
-    - diesel
-    - fuel
-    - hp petrol
-    - indian oil
-    - bharat petroleum
-    - uber
-    - ola
-    - rapido
-    - metro
-    - irctc
-    - railway
+    hint: "petrol pumps, cab rides (Uber/Ola/Rapido), auto rickshaw, metro, train, bus"
+    keywords:
+      - petrol
+      - diesel
+      - fuel
+      - hp petrol
+      - indian oil
+      - bharat petroleum
+      - uber
+      - olacabs
+      - ola cab
+      - rapido
+      - metro
+      - irctc
+      - railway
+      - cleartrip
+      - parkplus
+      - paytm train
+      - amazon bus
+      - flightsmojo
+      - airbnb
+      - go tours
+      - adarsh automobiles
+      - station
+      - auto
 
   Entertainment & Subscriptions:
-    - netflix
-    - spotify
-    - prime video
-    - hotstar
-    - bookmyshow
-    - pvr
-    - inox
-    - youtube
-    - apple music
-    - zee5
-    - sonyliv
-    - jiocinema
-    - subscription
+    hint: "Netflix, Spotify, OTT platforms, cinema, gaming, app subscriptions, escape rooms, activity venues, recreational experiences"
+    keywords:
+      - netflix
+      - spotify
+      - prime video
+      - hotstar
+      - bookmyshow
+      - pvr
+      - inox
+      - youtube
+      - apple music
+      - zee5
+      - sonyliv
+      - jiocinema
+      - subscription
+      - timezone
+      - apple media
+      - district
 
   Utilities & Bills:
-    - electricity
-    - bescom
-    - msedcl
-    - tata power
-    - water bill
-    - gas bill
-    - broadband
-    - airtel
-    - jio
-    - vi
-    - bsnl
-    - recharge
-    - postpaid
+    hint: "electricity (BESCOM/MSEDCL), water bill, gas bill, broadband, mobile recharge, postpaid"
+    keywords:
+      - amazon.in - bill p
+      - amazon recharge
+      - electricity
+      - bescom
+      - msedcl
+      - tata power
+      - water bill
+      - gas bill
+      - broadband
+      - airtel
+      - jio
+      - bsnl
+      - recharge
+      - postpaid
+      - urbancompany
+      - urban company
+      - laundry place
 
   Health & Medical:
-    - pharmacy
-    - medical
-    - hospital
-    - apollo
-    - medplus
-    - netmeds
-    - 1mg
-    - doctor
-    - clinic
-    - diagnostic
-
-  Education:
-    - education
-    - course
-    - udemy
-    - coursera
-    - fees
-    - tuition
+    hint: "pharmacy, hospital, doctor, diagnostics, wellness"
+    keywords:
+      - pharmacy
+      - medical
+      - hospital
+      - apollo
+      - medplus
+      - netmeds
+      - 1mg
+      - doctor
+      - clinic
+      - diagnostic
+      - wellness forever
 
   EMI & Loan:
-    - emi
-    - loan
-    - repayment
-    - education loan
-    - home loan
+    hint: "loan repayment, EMI auto-debit"
+    keywords:
+      - emi
+      - loan
+      - repayment
+      - education loan
+      - home loan
 
   Investment & SIP:
-    - sip
-    - mutual fund
-    - groww
-    - zerodha
-    - coin
-    - investment
-    - nps
-    - ppf
+    hint: "mutual fund SIP, Zerodha, Groww, NPS, PPF"
+    keywords:
+      - sip
+      - mutual fund
+      - groww
+      - zerodha
+      - coin
+      - investment
+      - nps
+      - ppf
 
   Rent:
-    - rent
-    - house rent
+    hint: "house rent payment"
+    keywords:
+      - rent
+      - house rent
 
   Credit Card Payment:
-    - credit card payment
-    - cc payment
-    - card payment
-    - bill payment hdfc
-    - bill payment icici
-    - bill payment axis
+    hint: "credit card bill payment via CRED/BBPS"
+    keywords:
+      - credit card payment
+      - cc payment
+      - card payment
+      - bill payment hdfc
+      - bill payment icici
+      - bill payment axis
+      - simpl
+      - bbps payment received
+      - tele transfer credit
 
   Internal Transfer:
-    - neft
-    - imps
-    - rtgs
-    - upi transfer
-    - self transfer
+    hint: "transfer between own bank accounts, NEFT/IMPS to self"
+    keywords:
+      - neft
+      - imps
+      - rtgs
+      - upi transfer
+      - self transfer
 
   Internal Transfer — Self:
-    []
+    hint: "transfer to own account, confirmed self-transfer"
+    keywords: []
 
   Internal Transfer — Other:
-    []
+    hint: "transfer to another person's account"
+    keywords: []
 
   ATM & Cash:
-    - atm
-    - cash withdrawal
-    - cdm
+    hint: "ATM cash withdrawal"
+    keywords:
+      - atm
+      - cash withdrawal
+      - cdm
+
+  Income:
+    hint: "salary credit, interest earned, cashback credited, refund from bank, dividend"
+    keywords:
+      - bajaj finance
+      - interest credit
+      - int cr
+      - interest earned
+      - salary credit
+      - cashback credit
+      - dividend
 
   Other:
-    - misc
-    - general
+    hint: "payments to individuals (person names like 'Sunita Dolas', 'Swami Raja'), unknown merchants, one-off transactions. If the description looks like a person's full name (first + last name), use Other."
+    keywords:
+      - misc
+      - general
