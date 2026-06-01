@@ -110,6 +110,7 @@ def resolve_row(row: pd.Series, label_to_id: dict, valid_categories: set) -> dic
         "source_label":        row.get("source_label", ""),
         "category":            final_cat,
         "is_internal_transfer": final_cat.startswith("Internal Transfer"),
+        "transaction_type":    row.get("transaction_type"),  # auto-detected from categorizer
         "splitwise_candidate": 0,
         "splitwise_pushed":    0,
         "notes":               row.get("notes", "") or "",
@@ -175,14 +176,15 @@ def insert_rows(rows: list[dict]) -> tuple[int, int]:
             INSERT INTO transactions
             (date, month, description, raw_description, canonical_merchant,
              amount, txn_type, source_id, source_label, category,
-             is_internal_transfer, splitwise_candidate, splitwise_pushed, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             is_internal_transfer, splitwise_candidate, splitwise_pushed, notes, transaction_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             r["date"], r["month"], r["description"], r["raw_description"],
             r["canonical_merchant"], r["amount"], r["txn_type"],
             r["source_id"], r["source_label"], r["category"],
             int(r["is_internal_transfer"]),
             r["splitwise_candidate"], r["splitwise_pushed"], r["notes"],
+            r.get("transaction_type"),  # refund or None
         ))
         existing.add(key)
         inserted += 1
@@ -193,10 +195,11 @@ def insert_rows(rows: list[dict]) -> tuple[int, int]:
 
 
 def upsert_cache(rows: list[dict]) -> int:
-    """Upsert corrections cache for explicitly corrected rows with a known merchant."""
+    """Upsert corrections cache for explicitly corrected rows with a known merchant.
+    Skip refunds — auto-detected by categorizer, not stored as merchant rule."""
     cached = 0
     for r in rows:
-        if r["_was_corrected"] and r["canonical_merchant"]:
+        if r["_was_corrected"] and r["canonical_merchant"] and r["category"] != "Refund":
             upsert(r["canonical_merchant"], r["category"], source_account_hint=r["source_id"])
             cached += 1
     return cached
