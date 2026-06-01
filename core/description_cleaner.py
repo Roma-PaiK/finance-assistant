@@ -232,6 +232,10 @@ def _extract(raw: str) -> tuple[str, str]:
     cleaned = _LONG_REF.sub('', cleaned).strip()
     cleaned = _CC_LOCATION_NOISE.sub('', cleaned).strip()
 
+    # Strip URL noise common in CC descriptions (e.g. "Http://Www.Am", "Https://...")
+    cleaned = re.sub(r'\s+https?://\S*', '', cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r'\s+www\.\S*', '', cleaned, flags=re.IGNORECASE).strip()
+
     # Drop leading SBI prefix tokens
     for prefix in _SBI_PREFIXES:
         if cleaned.upper().startswith(prefix):
