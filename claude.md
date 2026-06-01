@@ -527,6 +527,9 @@ Do these in sequence — each block depends on the previous:
 - Re-export `contacts/contacts.vcf` when you add/rename contacts in phone
 - Add new aliases to `config/contact_aliases.yaml` whenever a dry-run shows an unknown person payment
 
+### Pending keyword additions
+- **Rent — Kusum Devi**: rent is paid via UPI from Canara bank account to Kusum Devi. Once Canara stmt dry-run is done, check the exact description format and add her canonical name as a keyword under `Rent` in `config/categories.yaml`.
+
 ### Things to NOT forget
 - `--dry-run` → `import_corrections.py --save` for fresh months (INSERT flow)
 - `review.py export` → `review.py apply --save` for retroactive fixes (UPDATE flow)
