@@ -6,7 +6,10 @@ Order (first hit wins):
 2. Corrections DB lookup (canonical_merchant)
 3. SBI raw pattern rules
 4. YAML keyword rules (cleaned desc, then raw)
-5. LLM fallback (Ollama)
+   4a. Single match → assign directly (confidence 0.8)
+   4b. Multiple matches, one keyword is more specific (longer) → longer wins, no LLM
+   4c. Genuinely ambiguous (multiple matches, no clear winner) → LLM with constrained candidates
+5. LLM fallback (Ollama) — full fallback or constrained conflict resolution
 6. "Other" fallback
 
 Every txn gets: category, category_source, confidence
@@ -33,7 +36,29 @@ _llm_stats = {"sent": 0, "returned_valid": 0, "returned_other": 0, "errors": 0}
 def load_rules() -> dict[str, list[str]]:
     with open(CONFIG_PATH) as f:
         cfg = yaml.safe_load(f)
-    return cfg.get("categories", {})
+    result = {}
+    for cat, val in cfg.get("categories", {}).items():
+        if isinstance(val, dict):
+            result[cat] = val.get("keywords") or []
+        else:
+            result[cat] = val or []
+    return result
+
+
+def load_hints() -> dict[str, str]:
+    with open(CONFIG_PATH) as f:
+        cfg = yaml.safe_load(f)
+    return {
+        cat: val["hint"]
+        for cat, val in cfg.get("categories", {}).items()
+        if isinstance(val, dict) and val.get("hint")
+    }
+
+
+def load_llm_excluded() -> set[str]:
+    with open(CONFIG_PATH) as f:
+        cfg = yaml.safe_load(f)
+    return set(cfg.get("llm_excluded", []))
 
 
 # SBI raw description pattern rules — match on raw string before cleaning
@@ -44,9 +69,9 @@ SBI_RAW_RULES = [
     (r"upi/dr/.+/cnrb",                        "Internal Transfer"),
     (r"upi/dr/.+/hdfc",                        "Internal Transfer"),
     (r"neft.+(canara|cnrb)",                   "Internal Transfer"),
-    (r"bajaj finance",                         "Salary"),
-    (r"cmp\s+\w.+\s+ltd",                     "Salary"),
-    (r"int\.cr|savings bank interest|int cr",  "Interest"),
+    (r"bajaj finance",                         "Income"),
+    (r"cmp\s+\w.+\s+ltd",                     "Income"),
+    (r"int\.cr|savings bank interest|int cr",  "Income"),
     (r"atm\s*wdl|atm/",                       "ATM & Cash"),
     (r"ach\s+dr.+sip",                        "Investment & SIP"),
     (r"ach\s+dr.+mutual",                     "Investment & SIP"),
@@ -83,43 +108,110 @@ def _raw_rules_match(raw: str) -> str | None:
 
 
 def _yaml_rules_match(text: str, rules: dict) -> str | None:
+    """Single-match fast path — returns first matching category or None."""
+    result = _yaml_rules_match_all(text, rules)
+    if not result:
+        return None
+    if len(result) == 1:
+        return result[0][1]
+    # Multiple matches — return the one with the longest (most specific) keyword
+    winner = _resolve_by_specificity(result)
+    return winner
+
+
+def _yaml_rules_match_all(text: str, rules: dict) -> list[tuple[str, str]]:
+    """Returns list of (matched_keyword, category) for every matching keyword across all categories."""
     text_lower = text.lower()
+    matches = []
     for category, keywords in rules.items():
         if not keywords:
             continue
         for kw in keywords:
             if kw.lower() in text_lower:
-                return category
-    return None
+                matches.append((kw, category))
+    return matches
+
+
+def _resolve_by_specificity(matches: list[tuple[str, str]]) -> str | None:
+    """
+    Given multiple (keyword, category) matches, resolve by keyword length (longer = more specific).
+    Returns the winning category if one keyword is strictly longer than all others,
+    or None if there's a genuine tie (different keywords, same max length, different categories).
+    """
+    if not matches:
+        return None
+    max_len = max(len(kw) for kw, _ in matches)
+    longest = [(kw, cat) for kw, cat in matches if len(kw) == max_len]
+    # All longest hits agree on category → clear winner
+    categories = {cat for _, cat in longest}
+    if len(categories) == 1:
+        return longest[0][1]
+    return None  # genuine tie — caller should send to LLM
+
+
+def _yaml_conflict_resolve(text: str, rules: dict) -> tuple[str | None, list[str]]:
+    """
+    Full match analysis for Step 4.
+    Returns (resolved_category, candidate_categories).
+    - resolved_category is set when specificity resolves the conflict (no LLM needed)
+    - candidate_categories is the list to pass to LLM when resolution is ambiguous
+    - Both None/empty → no matches at all
+    """
+    matches = _yaml_rules_match_all(text, rules)
+    if not matches:
+        return None, []
+
+    unique_cats = list(dict.fromkeys(cat for _, cat in matches))  # preserve order, dedupe
+
+    if len(unique_cats) == 1:
+        return unique_cats[0], []  # single category, direct assign
+
+    winner = _resolve_by_specificity(matches)
+    if winner:
+        return winner, []  # specificity resolved it
+
+    return None, unique_cats  # genuine conflict → LLM needed
 
 
 def _llm_batch_categorize(txn_batch: list[dict], valid_categories: set[str]) -> dict:
     """
     Batch LLM categorization for multiple transactions (10x faster than sequential).
     Args: txn_batch list of dicts with 'description', 'raw_description', 'index'
+          Each item may optionally have 'candidate_categories': list[str] — constrained choice
+          for conflict resolution. If absent, full valid_categories list is used.
     Returns: dict mapping index → (category, confidence, status)
     """
     if not txn_batch:
         return {}
     _llm_stats["sent"] += len(txn_batch)
-    cats_list = "\n".join(f"- {c}" for c in sorted(valid_categories))
-    txn_lines = [
-        f'{{"index": {t["index"]}, "desc": "{t.get("description", "")}", "raw": "{t.get("raw_description", "") or t.get("description", "")}"}}'
-        for t in txn_batch
-    ]
-    prompt = f"""Categorize these {len(txn_batch)} bank transactions (Indian user):
-Categories: {", ".join(sorted(valid_categories))}
+    hints = load_hints()
+    hints_lines = "\n".join(f"  - {cat}: {desc}" for cat, desc in hints.items())
+    txn_lines = []
+    for t in txn_batch:
+        candidates = t.get("candidate_categories")
+        cats_str = ", ".join(candidates) if candidates else ", ".join(sorted(valid_categories))
+        txn_lines.append(
+            f'{{"index": {t["index"]}, "desc": "{t.get("description", "")}", '
+            f'"raw": "{t.get("raw_description", "") or t.get("description", "")}", '
+            f'"candidates": "{cats_str}"}}'
+        )
+    prompt = f"""Categorize these {len(txn_batch)} bank transactions (Indian user).
+Each transaction has a "candidates" field listing the only valid categories for that transaction.
+Choose from the candidates list for each transaction — do not use any other category.
+
+Category guide (use this to understand what each category covers):
+{hints_lines}
 
 Transactions:
 [{", ".join(txn_lines)}]
 
 Reply ONLY with JSON array:
 [{{"index": <int>, "category": "<cat>", "confidence": <0.0-1.0>}}, ...]
-Use "Other" if unsure."""
+Use "Other" only if none of the candidates fit."""
 
     try:
         resp = requests.post(OLLAMA_URL, json={
-            "model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": "json"
+            "model": OLLAMA_MODEL, "prompt": prompt, "stream": False
         }, timeout=OLLAMA_TIMEOUT * 2)
         if resp.status_code != 200:
             return {t["index"]: ("Other", 0.0, "http_error") for t in txn_batch}
@@ -220,6 +312,7 @@ Use "Other" if genuinely unsure. No explanation, no extra text."""
 def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> list[dict]:
     rules      = load_rules()
     valid_cats = set(rules.keys())
+    llm_cats   = valid_cats - load_llm_excluded()  # LLM never assigns excluded categories
     contacts   = get_contacts()
     aliases    = get_aliases()
     corrections_db.init_corrections_table()
@@ -255,16 +348,29 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
             continue
 
         # Step 2.5: contact match — UPI P2P payments to known people
+        # Skip if YAML keyword rules already match — prevents merchant names that
+        # share a word with a contact name (e.g. "Bajaj Finance" / "Bhavna Bajaj")
+        # from being misclassified as a person payment.
         source = txn.get("source_id", "")
         is_savings = source.startswith("acc_")
-        if is_savings and canonical:
+        _yaml_pre, _ = _yaml_conflict_resolve(raw, rules)
+        if not _yaml_pre:
+            _yaml_pre, _ = _yaml_conflict_resolve(cleaned, rules)
+        if is_savings and canonical and not _yaml_pre:
             contact = match_contact(canonical, contacts, aliases)
             if contact:
-                txn["category"] = "Other"
-                txn["category_source"] = "contact_match"
-                txn["confidence"] = contact["confidence"]
-                txn["splitwise_candidate"] = 1
-                txn["notes"] = (txn.get("notes") or "") + f" [contact: {contact['name']}]"
+                if contact.get("relation") == "self":
+                    txn["category"] = "Internal Transfer — Self"
+                    txn["category_source"] = "contact_match"
+                    txn["confidence"] = contact["confidence"]
+                    txn["is_internal_transfer"] = True
+                    txn["notes"] = (txn.get("notes") or "") + f" [contact: {contact['name']}]"
+                else:
+                    txn["category"] = "Other"
+                    txn["category_source"] = "contact_match"
+                    txn["confidence"] = contact["confidence"]
+                    txn["splitwise_candidate"] = 1
+                    txn["notes"] = (txn.get("notes") or "") + f" [contact: {contact['name']}]"
                 continue
 
         # Step 3: SBI raw pattern rules
@@ -276,14 +382,29 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
             continue
 
         # Step 4: YAML keyword rules (try cleaned desc first, then raw)
-        cat = _yaml_rules_match(cleaned, rules) or _yaml_rules_match(raw, rules)
+        cat, conflict_cats = _yaml_conflict_resolve(cleaned, rules)
+        if not cat and not conflict_cats:
+            cat, conflict_cats = _yaml_conflict_resolve(raw, rules)
+
         if cat:
+            # Single match or specificity resolved it — no LLM needed
             txn["category"] = cat
             txn["category_source"] = "yaml_rules"
             txn["confidence"] = 0.8
             continue
 
-        # Step 5: LLM fallback — collect for batch processing
+        if conflict_cats:
+            # Genuine ambiguity — send to LLM with constrained candidates
+            if use_llm:
+                llm_candidates.append({
+                    "index": idx,
+                    "description": cleaned,
+                    "raw_description": raw,
+                    "candidate_categories": conflict_cats,
+                })
+            continue
+
+        # Step 5: LLM fallback — no YAML match at all
         if use_llm:
             llm_candidates.append({"index": idx, "description": cleaned, "raw_description": raw})
 
@@ -292,13 +413,16 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
         BATCH_SIZE = 15
         for batch_start in range(0, len(llm_candidates), BATCH_SIZE):
             batch = llm_candidates[batch_start:batch_start + BATCH_SIZE]
-            results = _llm_batch_categorize(batch, valid_cats)
+            results = _llm_batch_categorize(batch, llm_cats)
             for item in batch:
                 idx = item["index"]
-                # Batch always returns a result (or defaults to Other internally)
                 cat, conf, status = results.get(idx, ("Other", 0.0, "missing"))
                 transactions[idx]["category"] = cat
-                transactions[idx]["category_source"] = "llm" if cat != "Other" else "fallback"
+                if cat != "Other":
+                    source = "llm_conflict" if item.get("candidate_categories") else "llm"
+                else:
+                    source = "fallback"
+                transactions[idx]["category_source"] = source
                 transactions[idx]["confidence"] = conf
 
     # Step 6: Verify ALL transactions have a category (safety check)
@@ -308,9 +432,84 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
             txn["category_source"] = "fallback"
             txn["confidence"] = 0.0
 
+    # Auto-detect refunds: credit same merchant + amount within N days of debit
+    _detect_refunds(transactions)
+
+    # Account-level filter: BOB is a joint account.
+    # Only SIPs and self-transfers belong to the user — exclude everything else.
+    for txn in transactions:
+        if txn.get("source_id") == "acc_bob_sip":
+            cat = txn.get("category", "")
+            raw = (txn.get("raw_description", "") or "").lower()
+            # Self-transfer: IMPS/P2A from Roma Pa — description cleaner strips the name,
+            # leaving keyword like "Investments" which fires YAML rules → wrong category.
+            # Catch by checking raw description directly.
+            if "roma pa" in raw:
+                txn["category"] = "Internal Transfer — Self"
+                txn["category_source"] = "account_filter"
+                txn["is_internal_transfer"] = True
+            elif cat != "Investment & SIP" and not cat.startswith("Internal Transfer"):
+                txn["category"] = "Internal Transfer"
+                txn["category_source"] = "account_filter"
+                txn["is_internal_transfer"] = True
+
     # Sync is_internal_transfer flag post-categorization
     for txn in transactions:
         if txn.get("category") == "Internal Transfer":
             txn["is_internal_transfer"] = True
 
     return transactions
+
+
+def _detect_refunds(transactions: list[dict], days_window: int = 30):
+    """
+    Auto-detect refunds: for each credit, find matching debit with same merchant + amount.
+    If found within days_window, mark credit as transaction_type = 'refund'.
+    Handles cases like IPO allotment refunds (debit → credit after days, not same day).
+    """
+    from datetime import datetime, timedelta
+
+    def parse_date(d: str) -> datetime | None:
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(d, fmt)
+            except ValueError:
+                continue
+        return None
+
+    # Group debits by (merchant, amount) for fast lookup
+    debits_by_key = {}
+    for idx, txn in enumerate(transactions):
+        if txn.get("txn_type") == "debit":
+            key = (txn.get("canonical_merchant", ""), txn.get("amount", 0))
+            if key not in debits_by_key:
+                debits_by_key[key] = []
+            debits_by_key[key].append((idx, txn))
+
+    # Check each credit for refund match
+    for idx, txn in enumerate(transactions):
+        if txn.get("txn_type") != "credit":
+            continue
+
+        key = (txn.get("canonical_merchant", ""), txn.get("amount", 0))
+        if key not in debits_by_key:
+            continue
+
+        credit_date = parse_date(txn.get("date", ""))
+        if not credit_date:
+            continue
+
+        # Find matching debit within days_window
+        for debit_idx, debit_txn in debits_by_key[key]:
+            debit_date = parse_date(debit_txn.get("date", ""))
+            if not debit_date:
+                continue
+
+            # Check if credit is within days_window AFTER debit
+            if 0 <= (credit_date - debit_date).days <= days_window:
+                # Match found — mark credit as refund
+                txn["transaction_type"] = "refund"
+                txn["category"] = "Refund"
+                txn["category_source"] = "refund_detection"
+                txn["confidence"] = 0.95
+                break  # Only match once per credit
