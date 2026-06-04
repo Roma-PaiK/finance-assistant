@@ -56,7 +56,7 @@ def _merge_transfer_type(category: str, transfer_type: str) -> tuple[str, bool]:
     if t == "self":
         return "Internal Transfer — Self", False
     elif t in ("other", "others"):
-        return "Internal Transfer — Other", False
+        return "Internal Transfer", False
     elif t == "unknown":
         return "Internal Transfer", True
     return "Internal Transfer", False

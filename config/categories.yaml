@@ -9,7 +9,6 @@
 llm_excluded:
   - Internal Transfer
   - Internal Transfer — Self
-  - Internal Transfer — Other
   - Rent
   - Credit Card Payment
   - EMI & Loan
@@ -149,6 +148,7 @@ categories:
       - postpaid
       - urbancompany
       - urban company
+      
       - laundry place
 
   Health & Medical:
@@ -219,9 +219,6 @@ categories:
     hint: "transfer to own account, confirmed self-transfer"
     keywords: []
 
-  Internal Transfer — Other:
-    hint: "transfer to another person's account"
-    keywords: []
 
   ATM & Cash:
     hint: "ATM cash withdrawal"
@@ -237,6 +234,7 @@ categories:
       - interest credit
       - int cr
       - interest earned
+      - savings bank interest
       - salary credit
       - cashback credit
       - dividend
