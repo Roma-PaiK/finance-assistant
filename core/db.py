@@ -109,6 +109,7 @@ def init_db():
             pass  # column already exists
     conn.commit()
     _backfill_date_parsed(conn)
+    _normalize_date_column(conn)
     _backfill_transaction_type(conn)
     conn.close()
 
@@ -133,6 +134,18 @@ def _backfill_date_parsed(conn: sqlite3.Connection):
         if iso:
             conn.execute("UPDATE transactions SET date_parsed = ? WHERE id = ?", (iso, row["id"]))
     conn.commit()
+
+
+def _normalize_date_column(conn: sqlite3.Connection):
+    """Migration: ensure `date` column is ISO (YYYY-MM-DD) for all rows.
+    Converts any DD/MM/YYYY values in-place using date_parsed as source of truth."""
+    rows = conn.execute(
+        "SELECT id, date_parsed FROM transactions WHERE date NOT LIKE '____-__-__' AND date_parsed IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        conn.execute("UPDATE transactions SET date = ? WHERE id = ?", (row["date_parsed"], row["id"]))
+    if rows:
+        conn.commit()
 
 
 def _backfill_transaction_type(conn: sqlite3.Connection):
@@ -229,6 +242,7 @@ def insert_transactions(transactions: list[dict]) -> int:
                 "internal_transfer" if is_transfer else "genuine_spend"
             )
             date_parsed = _parse_date_to_iso(txn.get("date", ""))
+            date_iso = date_parsed or txn.get("date", "")  # always store ISO; fallback to raw if unparseable
             conn.execute("""
                 INSERT INTO transactions
                 (date, month, description, raw_description, canonical_merchant,
@@ -238,7 +252,7 @@ def insert_transactions(transactions: list[dict]) -> int:
                  transaction_type, date_parsed)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                txn["date"], txn["month"], txn["description"], txn["raw_description"],
+                date_iso, txn["month"], txn["description"], txn["raw_description"],
                 txn.get("canonical_merchant", ""),
                 txn["amount"], txn["txn_type"], txn["source_id"], txn["source_label"],
                 txn["category"], txn.get("category_source"), txn.get("confidence", 0.0),
