@@ -29,8 +29,10 @@ ALIASES_PATH  = os.path.join(os.path.dirname(__file__), "..", "config", "contact
 # Min token length to use in substring matching (avoids "Ed", "An" false hits)
 MIN_TOKEN_LEN = 4
 
-# Fuzzy match threshold
-FUZZY_THRESHOLD = 0.72
+# Fuzzy match threshold — raised to eliminate similar-but-different names
+# e.g. "Chaithra" vs "Chaitali" ≈ 0.75 (eliminated); truncations like
+# "Suresh Pa" vs "Suresh Pai" ≈ 0.95 (safe)
+FUZZY_THRESHOLD = 0.85
 
 
 def _clean_name(name: str) -> str:
