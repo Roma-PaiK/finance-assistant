@@ -61,26 +61,66 @@ def load_llm_excluded() -> set[str]:
     return set(cfg.get("llm_excluded", []))
 
 
-# SBI raw description pattern rules — match on raw string before cleaning
-SBI_RAW_RULES = [
-    (r"imps/\d+/cnrb",                        "Internal Transfer"),
-    (r"imps/\d+/hdfc",                         "Internal Transfer"),
-    (r"imps/\d+/barb",                         "Internal Transfer"),
-    (r"upi/dr/.+/cnrb",                        "Internal Transfer"),
-    (r"upi/dr/.+/hdfc",                        "Internal Transfer"),
-    (r"neft.+(canara|cnrb)",                   "Internal Transfer"),
-    (r"bajaj finance",                         "Income"),
-    (r"cmp\s+\w.+\s+ltd",                     "Income"),
-    (r"int\.cr|savings bank interest|int cr",  "Income"),
-    (r"atm\s*wdl|atm/",                       "ATM & Cash"),
-    (r"ach\s+dr.+sip",                        "Investment & SIP"),
-    (r"ach\s+dr.+mutual",                     "Investment & SIP"),
-    (r"ach\s+dr.+loan",                       "EMI & Loan"),
-    (r"ach\s+dr.+finance",                    "EMI & Loan"),
-    (r"upi/dr/.+/paytm",                      "Utilities & Bills"),
-    (r"upi/dr/.+/swiggy",                     "Food & Dining"),
-    (r"upi/dr/.+/zomato",                     "Food & Dining"),
+# Raw description pattern rules — regex only, for patterns YAML substring matching can't express.
+# Keep this list minimal. Simple keywords belong in config/categories.yaml instead.
+# Redundant rules (imps/neft/atm/bajaj/int cr) removed — covered by YAML keywords.
+# Broad UPI bank-name rules removed — matched merchant's bank, not own account (false positives).
+RAW_RULES = [
+    (r"cmp\s+\w.+\s+ltd",   "Income"),           # SBI salary: "CMP <company> LTD"
+    (r"ach\s+dr.+sip",      "Investment & SIP"),  # SIP NACH auto-debit
+    (r"ach\s+dr.+mutual",   "Investment & SIP"),  # Mutual fund NACH auto-debit
+    (r"ach\s+dr.+loan",     "EMI & Loan"),         # Loan EMI NACH auto-debit
+    (r"ach\s+dr.+finance",  "EMI & Loan"),         # Finance EMI NACH auto-debit
 ]
+
+
+def _load_own_account_last4() -> set[str]:
+    """Load last4 digits for all own bank accounts and credit cards from accounts.yaml."""
+    accounts_path = os.path.join(os.path.dirname(__file__), "..", "config", "accounts.yaml")
+    try:
+        with open(accounts_path) as f:
+            cfg = yaml.safe_load(f)
+    except FileNotFoundError:
+        return set()
+    last4s = set()
+    for section in ("accounts", "credit_cards"):
+        for acct in cfg.get(section, []):
+            val = acct.get("last4", "")
+            if val:
+                last4s.add(str(val).strip())
+    return last4s
+
+
+def _is_self_transfer_by_last4(raw: str, own_last4: set[str]) -> bool:
+    """
+    Return True if the description references an own account — detected via:
+    1. Partial masked account number (xx972, xx183) whose last 3 digits match any own account last3/last4.
+    2. Account label contains "my " (e.g. "My HDFC") — SBI IMPS labels own accounts this way.
+
+    Handles both 3-digit and 4-digit last4 values in accounts.yaml.
+    Only fires when one of these signals appears inside a BANK-xxDDD or BANK-xxDDDD pattern,
+    not on bare digit sequences elsewhere in the description.
+    """
+    raw_lower = raw.lower()
+
+    # Signal 2: "my " in description → user labelled this as their own account
+    if re.search(r'\bmy\b', raw_lower):
+        return True
+
+    if not own_last4:
+        return False
+
+    # Build set of last3 digits from all own accounts (handles 3-digit and 4-digit last4)
+    own_last3 = {v[-3:] for v in own_last4 if len(v) >= 3}
+
+    # Signal 1: masked account patterns like xx972, xx183 inside BANK-xx...- segments
+    # Pattern: optional x-prefix + 3 or 4 digits, anchored inside a word boundary or separator
+    candidates = re.findall(r'[xX]{1,2}(\d{3,4})', raw)
+    for c in candidates:
+        if c[-3:] in own_last3:
+            return True
+
+    return False
 
 
 def _corrections_lookup(canonical_merchant: str) -> tuple[str | None, float]:
@@ -101,7 +141,7 @@ def _corrections_lookup(canonical_merchant: str) -> tuple[str | None, float]:
 
 def _raw_rules_match(raw: str) -> str | None:
     raw_lower = raw.lower()
-    for pattern, category in SBI_RAW_RULES:
+    for pattern, category in RAW_RULES:
         if re.search(pattern, raw_lower):
             return category
     return None
@@ -190,14 +230,24 @@ def _llm_batch_categorize(txn_batch: list[dict], valid_categories: set[str]) -> 
     for t in txn_batch:
         candidates = t.get("candidate_categories")
         cats_str = ", ".join(candidates) if candidates else ", ".join(sorted(valid_categories))
+        contact_hint = t.get("contact_hint")
+        hint_field = f', "contact_hint": "{contact_hint}"' if contact_hint else ""
+        txn_type = t.get("txn_type", "")
+        dir_field = f', "dir": "{txn_type}"' if txn_type else ""
         txn_lines.append(
             f'{{"index": {t["index"]}, "desc": "{t.get("description", "")}", '
             f'"raw": "{t.get("raw_description", "") or t.get("description", "")}", '
-            f'"candidates": "{cats_str}"}}'
+            f'"candidates": "{cats_str}"{hint_field}{dir_field}}}'
         )
     prompt = f"""Categorize these {len(txn_batch)} bank transactions (Indian user).
 Each transaction has a "candidates" field listing the only valid categories for that transaction.
-Choose from the candidates list for each transaction — do not use any other category.
+Choose from the candidates list — do not use any other category.
+"dir" field: "credit" = money coming IN (cashback, salary, refund), "debit" = money going OUT.
+Use "dir" to disambiguate: e.g. credit from Paytm/Supermoney/CRED = cashback → Income,
+debit to same = subscription/utility payment → respective category.
+If a transaction has "contact_hint", it means the payee matched a contact in the user's phone.
+"Other" in candidates = personal payment to that contact (splitwise). Only use Other if the
+description is clearly a person-to-person payment, not a merchant/service.
 
 Category guide (use this to understand what each category covers):
 {hints_lines}
@@ -207,7 +257,7 @@ Transactions:
 
 Reply ONLY with JSON array:
 [{{"index": <int>, "category": "<cat>", "confidence": <0.0-1.0>}}, ...]
-Use "Other" only if none of the candidates fit."""
+Use "Other" only if none of the other candidates fit."""
 
     try:
         resp = requests.post(OLLAMA_URL, json={
@@ -309,12 +359,13 @@ Use "Other" if genuinely unsure. No explanation, no extra text."""
         return "Other", 0.0, "exception"
 
 
-def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> list[dict]:
+def categorize_transactions(transactions: list[dict], use_llm: bool = True, use_corrections: bool = True) -> list[dict]:
     rules      = load_rules()
     valid_cats = set(rules.keys())
     llm_cats   = valid_cats - load_llm_excluded()  # LLM never assigns excluded categories
     contacts   = get_contacts()
     aliases    = get_aliases()
+    own_last4  = _load_own_account_last4()
     corrections_db.init_corrections_table()
 
     # Reset LLM stats for this run
@@ -334,29 +385,35 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
 
         # Step 1: internal transfer flag (set by deduplicator)
         if txn.get("is_internal_transfer"):
-            txn["category"] = "Internal Transfer"
+            # Confirm self-transfer via alias patterns ("Roma Can", "Roma BoB" etc.)
+            # or by matching a partial account number in the description against own accounts.
+            raw_lower = (raw or "").lower()
+            is_self = (
+                any(a["pattern"] in raw_lower for a in aliases if a.get("relation") == "self")
+                or _is_self_transfer_by_last4(raw, own_last4)
+            )
+            txn["category"] = "Internal Transfer — Self" if is_self else "Internal Transfer"
             txn["category_source"] = "internal_transfer_flag"
             txn["confidence"] = 1.0
             continue
 
         # Step 2: corrections DB — canonical merchant match
-        cat, conf = _corrections_lookup(canonical)
-        if cat:
-            txn["category"] = cat
-            txn["category_source"] = "corrections_db"
-            txn["confidence"] = conf
-            continue
+        if use_corrections:
+            cat, conf = _corrections_lookup(canonical)
+            if cat:
+                txn["category"] = cat
+                txn["category_source"] = "corrections_db"
+                txn["confidence"] = conf
+                continue
 
-        # Step 2.5: contact match — UPI P2P payments to known people
-        # Skip if YAML keyword rules already match — prevents merchant names that
-        # share a word with a contact name (e.g. "Bajaj Finance" / "Bhavna Bajaj")
-        # from being misclassified as a person payment.
+        # Step 2.5: contact match — UPI P2P payments to known people.
+        # Self-transfers are definitive (no conflict possible).
+        # Non-self matches are stored as contact_hit and resolved in Step 4:
+        # if YAML also fires, the conflict goes to LLM; otherwise direct → Other.
         source = txn.get("source_id", "")
         is_savings = source.startswith("acc_")
-        _yaml_pre, _ = _yaml_conflict_resolve(raw, rules)
-        if not _yaml_pre:
-            _yaml_pre, _ = _yaml_conflict_resolve(cleaned, rules)
-        if is_savings and canonical and not _yaml_pre:
+        contact_hit = None
+        if is_savings and canonical:
             contact = match_contact(canonical, contacts, aliases)
             if contact:
                 if contact.get("relation") == "self":
@@ -365,13 +422,17 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
                     txn["confidence"] = contact["confidence"]
                     txn["is_internal_transfer"] = True
                     txn["notes"] = (txn.get("notes") or "") + f" [contact: {contact['name']}]"
+                    continue
                 else:
-                    txn["category"] = "Other"
-                    txn["category_source"] = "contact_match"
-                    txn["confidence"] = contact["confidence"]
-                    txn["splitwise_candidate"] = 1
-                    txn["notes"] = (txn.get("notes") or "") + f" [contact: {contact['name']}]"
-                continue
+                    contact_hit = contact  # defer — check for YAML conflict in Step 4
+
+        # Step 2.7: own-account last-4 digit match — catches masked account refs in description
+        if is_savings and _is_self_transfer_by_last4(raw, own_last4):
+            txn["category"] = "Internal Transfer — Self"
+            txn["category_source"] = "account_last4_match"
+            txn["confidence"] = 0.9
+            txn["is_internal_transfer"] = True
+            continue
 
         # Step 3: SBI raw pattern rules
         cat = _raw_rules_match(raw)
@@ -387,26 +448,58 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
             cat, conflict_cats = _yaml_conflict_resolve(raw, rules)
 
         if cat:
-            # Single match or specificity resolved it — no LLM needed
+            # YAML cleanly resolved → trust it regardless of contact match.
+            # Businesses saved as contacts (e.g. "handmade cafe") should not
+            # override a clear YAML keyword rule.
             txn["category"] = cat
             txn["category_source"] = "yaml_rules"
             txn["confidence"] = 0.8
             continue
 
-        if conflict_cats:
-            # Genuine ambiguity — send to LLM with constrained candidates
+        txn_type = txn.get("txn_type", "")
+
+        if conflict_cats and not contact_hit:
+            # YAML ambiguous, no contact → LLM with constrained candidates
             if use_llm:
                 llm_candidates.append({
                     "index": idx,
                     "description": cleaned,
                     "raw_description": raw,
                     "candidate_categories": conflict_cats,
+                    "txn_type": txn_type,
                 })
             continue
 
-        # Step 5: LLM fallback — no YAML match at all
+        if conflict_cats and contact_hit:
+            # YAML genuinely ambiguous + contact fired → LLM resolves
+            if use_llm:
+                candidates = list(dict.fromkeys(conflict_cats + ["Other"]))
+                llm_candidates.append({
+                    "index": idx,
+                    "description": cleaned,
+                    "raw_description": raw,
+                    "candidate_categories": candidates,
+                    "contact_hint": contact_hit["name"],
+                    "txn_type": txn_type,
+                })
+            else:
+                txn["category"] = conflict_cats[0]
+                txn["category_source"] = "yaml_rules"
+                txn["confidence"] = 0.7
+            continue
+
+        if contact_hit:
+            # Only contact match fired, no YAML signal → direct assign Other
+            txn["category"] = "Other"
+            txn["category_source"] = "contact_match"
+            txn["confidence"] = contact_hit["confidence"]
+            txn["splitwise_candidate"] = 1
+            txn["notes"] = (txn.get("notes") or "") + f" [contact: {contact_hit['name']}]"
+            continue
+
+        # Step 5: LLM fallback — no YAML match, no contact
         if use_llm:
-            llm_candidates.append({"index": idx, "description": cleaned, "raw_description": raw})
+            llm_candidates.append({"index": idx, "description": cleaned, "raw_description": raw, "txn_type": txn_type})
 
     # PASS 2: Batch LLM call for all fallback candidates
     if use_llm and llm_candidates:
@@ -419,11 +512,18 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
                 cat, conf, status = results.get(idx, ("Other", 0.0, "missing"))
                 transactions[idx]["category"] = cat
                 if cat != "Other":
-                    source = "llm_conflict" if item.get("candidate_categories") else "llm"
+                    src = "llm_conflict" if item.get("candidate_categories") else "llm"
                 else:
-                    source = "fallback"
-                transactions[idx]["category_source"] = source
+                    src = "fallback"
+                transactions[idx]["category_source"] = src
                 transactions[idx]["confidence"] = conf
+                # Contact+YAML conflict resolved as Other → mark splitwise candidate
+                if cat == "Other" and item.get("contact_hint"):
+                    transactions[idx]["splitwise_candidate"] = 1
+                    transactions[idx]["notes"] = (
+                        (transactions[idx].get("notes") or "") +
+                        f" [contact: {item['contact_hint']}]"
+                    )
 
     # Step 6: Verify ALL transactions have a category (safety check)
     for txn in transactions:
@@ -455,7 +555,7 @@ def categorize_transactions(transactions: list[dict], use_llm: bool = True) -> l
 
     # Sync is_internal_transfer flag post-categorization
     for txn in transactions:
-        if txn.get("category") == "Internal Transfer":
+        if (txn.get("category") or "").startswith("Internal Transfer"):
             txn["is_internal_transfer"] = True
 
     return transactions
@@ -490,6 +590,8 @@ def _detect_refunds(transactions: list[dict], days_window: int = 30):
     for idx, txn in enumerate(transactions):
         if txn.get("txn_type") != "credit":
             continue
+        if txn.get("is_internal_transfer"):
+            continue  # self-transfers are not refunds
 
         key = (txn.get("canonical_merchant", ""), txn.get("amount", 0))
         if key not in debits_by_key:
