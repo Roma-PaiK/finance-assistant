@@ -23,6 +23,21 @@ aliases:
     contact_name: "Roma Pai"
     relation: self
 
+  - bank_pattern: "Roma Can"
+    contact_name: "Roma Pai"
+    relation: self
+    note: "Self — Canara account (IMPS description format)"
+
+  - bank_pattern: "Roma BoB"
+    contact_name: "Roma Pai"
+    relation: self
+    note: "Self — BOB account (IMPS description format)"
+
+  - bank_pattern: "Roma Hdf"
+    contact_name: "Roma Pai"
+    relation: self
+    note: "Self — HDFC account (IMPS description format)"
+
   # ── Family ──────────────────────────────────────────────────────────────────
 
   - bank_pattern: "Karkala Su"
