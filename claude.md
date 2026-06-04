@@ -160,24 +160,42 @@ uv run main.py canara_jan.pdf
 
 ## Block 6 — Evaluation Harness (Deferred from Phase 1)
 
-**Status:** ⬜ Not started
+**Status:** ✅ Done
 
 **Role:** Answers "did my changes actually improve tagging?" with a number. Without this, every config/prompt tweak is guesswork.
 
 **What to do:**
 
-- Freeze current corrected DB as ground truth snapshot (398 seeded transactions = baseline)
-- Build `eval.py`:
-  - Input: raw statement files (same ones used for seeding)
-  - Re-runs full pipeline from scratch (fresh categorization, no corrections DB)
-  - Compares output categories to ground truth
-  - Outputs: accuracy %, per-category breakdown, confusion matrix for top mismatches
-- Track score per iteration — any prompt change, model swap (llama3 → qwen → Haiku), or rule edit triggers a run
-- Catch regressions before committing
+- Ground truth = current DB categories (manually verified; 1466 non-internal-transfer rows)
+- `eval.py` re-runs pipeline on raw descriptions, compares predicted vs DB category
+- Two modes: `--with-corrections` (production pipeline) vs default (rules-only honest eval)
+
+**Commands:**
+```
+uv run python eval.py                    # rules only, no LLM (fast baseline)
+uv run python eval.py --with-corrections # full pipeline incl. corrections DB
+uv run python eval.py --llm              # enable LLM fallback (slow)
+uv run python eval.py --month 2025-01    # single month
+uv run python eval.py --source acc_canara_daily
+uv run python eval.py --out results.csv  # per-row CSV dump
+```
 
 **Output:**
 
-> *Fill in when done. Example: baseline accuracy score, best-performing prompt/model, path to eval.py, score history.*
+> **Done.** `eval.py`. Baseline scores on 1466 rows (2025, all sources, excl. internal transfers):
+>
+> | Mode | Accuracy |
+> |---|---|
+> | Rules only (no corrections, no LLM) | **78.0%** |
+> | Rules + corrections DB (no LLM) | **86.0%** |
+>
+> Key findings from baseline run (2026-06-04):
+> - `corrections_db` source: 118/118 correct (100%) — corrections DB is reliable
+> - `fallback` (Other): 395/588 = 67% — largest error source; 193 rows land in Other when they shouldn't
+> - Top gaps: Food & Dining (−53 to Other), Groceries (−34), Income (−34), Health & Medical (−22)
+> - Refund detection: 0% in eval context (cross-txn matching can't fire on DB subset) — not a real accuracy gap
+> - ATM & Cash: 28.6% — needs keyword coverage in categories.yaml
+> - Income: 37% — Canara income credits not caught by raw_rules (SBI-only) or YAML keywords
 
 ---
 
@@ -435,60 +453,44 @@ ALTER TABLE transactions ADD COLUMN splitwise_group TEXT;         -- e.g. "Goa t
 
 ## Block 12 — CC Statement Catchup (Ongoing Data Task)
 
-**Status:** ⬜ Not started
+**Status:** ✅ Done (2025 scope)
 
 **Role:** Phase 1 only ingested 1 month of CC statements. Block 5 reconciliation needs the matching CC statements to work. This is a data loading task, not a code task — but it needs to be tracked.
 
-**⚠️ One-time setup required for Tata Neu HDFC CC (new card — do before loading any statements):**
-1. Add to `config/accounts.yaml` — label `Tata Neu HDFC CC`, source ID `cc_hdfc_tataneu`, last 4 digits of card
-2. Add PDF password to `config/passwords.yaml` under `cc_hdfc_tataneu`
-3. Add `tataneu` (and any variant HDFC uses in the filename) as a filename keyword in `parsers/detector.py` → maps to the existing HDFC CC parser config in `parsers/base.py BANK_CONFIGS` (reuse Moneyback config)
-4. Dry-run one statement to confirm rows extract correctly before committing anything
+**Scope decision:** 2025 data only for Phase 2. 2026 statements added later. Axis Supermoney and Tata Neu HDFC both activated in 2026 — no 2025 statements exist for these cards.
 
-**What to do:**
-
-1. Gather all available CC statements for all 4 cards (HDFC Moneyback, Amazon ICICI, Axis Supermoney, Tata Neu HDFC)
-   - Recent months: individual monthly PDFs — name and upload as-is
-   - Older months: may be a single consolidated multi-cycle PDF from the bank — Block 5 parser handles splitting per cycle
-   - Tata Neu HDFC: only load from the month the card was activated — don't try to backfill before that
-2. Run dry-run for each file, verify row counts per cycle look right
-3. Fix any categories via dry-run review before committing
-4. Commit to DB — Block 5 reconciliation will then auto-link CC settlements on Canara and HDFC savings
-
-**Statement naming to use:**
-```
-hdfc_moneyback_jan2025.pdf, hdfc_moneyback_feb2025.pdf, ...
-amazon_icici_jan2025.pdf, ...
-axis_jan2025.pdf, ...
-tataneu_jan2025.pdf, ...        ← or hdfc_tataneu_jan2025.pdf — pick one, stay consistent
-```
-
-**Tracking table — fill in as you go (⬜ = not done, ✅ = ingested, N/A = card not active that month):**
+**Tracking table (⬜ = not done, ✅ = ingested, N/A = card not active that month):**
 
 | Month | HDFC Moneyback | Amazon ICICI | Axis Supermoney | Tata Neu HDFC |
 |---|---|---|---|---|
-| 2025-01 | ⬜ | ⬜ | ⬜ | N/A |
-| 2025-02 | ⬜ | ⬜ | ⬜ | N/A |
-| 2025-03 | ⬜ | ⬜ | ⬜ | N/A |
-| 2025-04 | ⬜ | ⬜ | ⬜ | N/A |
-| 2025-05 | ⬜ | ⬜ | ⬜ | N/A |
-| 2025-06 | ⬜ | ⬜ | ⬜ | N/A |
-| 2025-07 | ⬜ | ⬜ | ⬜ | N/A |
-| 2025-08 | ⬜ | ⬜ | ⬜ | N/A |
-| 2025-09 | ⬜ | ⬜ | ⬜ | N/A |
-| 2025-10 | ⬜ | ⬜ | ⬜ | N/A |
-| 2025-11 | ⬜ | ⬜ | ⬜ | N/A |
-| 2025-12 | ⬜ | ⬜ | ⬜ | N/A |
+| 2025-01 | ✅ | ✅ | N/A | N/A |
+| 2025-02 | ✅ | ✅ | N/A | N/A |
+| 2025-03 | ✅ | ✅ | N/A | N/A |
+| 2025-04 | ✅ | ✅ | N/A | N/A |
+| 2025-05 | ✅ | ✅ | N/A | N/A |
+| 2025-06 | ✅ | ✅ | N/A | N/A |
+| 2025-07 | ✅ | ✅ | N/A | N/A |
+| 2025-08 | ✅ | ✅ | N/A | N/A |
+| 2025-09 | ✅ | ✅ | N/A | N/A |
+| 2025-10 | ✅ | ✅ | N/A | N/A |
+| 2025-11 | ✅ | ✅ | N/A | N/A |
+| 2025-12 | ✅ | ✅ | N/A | N/A |
 | 2026-01 | ⬜ | ⬜ | ⬜ | ⬜ |
 | 2026-02 | ⬜ | ⬜ | ⬜ | ⬜ |
 | 2026-03 | ⬜ | ⬜ | ⬜ | ⬜ |
 | 2026-04 | ⬜ | ⬜ | ⬜ | ⬜ |
 
-> Update Tata Neu HDFC column: replace `N/A` with `⬜` from the month you activated the card. Once Block 5B (re-upload dedup) is done, re-uploading any month will be safe — it will skip or warn instead of duplicating.
+> 2026 rows: do after Phase 2 is stable. Tata Neu + Axis setup notes preserved below for when needed.
+
+**⚠️ One-time setup required for Tata Neu HDFC CC (do before loading any 2026 statements):**
+1. Add to `config/accounts.yaml` — label `Tata Neu HDFC CC`, source ID `cc_hdfc_tataneu`, last 4 digits of card
+2. Add PDF password to `config/passwords.yaml` under `cc_hdfc_tataneu`
+3. Add `tataneu` keyword in `parsers/detector.py` → maps to HDFC CC parser in `BANK_CONFIGS`
+4. Dry-run one statement to confirm before committing
 
 **Output:**
 
-> *Fill in as you go — update table above. Note any months where extraction had issues or consolidated docs were used.*
+> All 2025 months for HDFC Moneyback (610 rows) and Amazon ICICI (186 rows) ingested via import_corrections.py from dry-run CSVs. DB total at completion: 1602 rows across all sources.
 
 ---
 
