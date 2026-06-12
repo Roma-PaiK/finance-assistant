@@ -49,3 +49,25 @@ aliases:
     contact_name: "Suresh pai"
     relation: family
     note: "Dad — may appear without Karkala prefix"
+
+  - bank_pattern: "Karkala T"
+    contact_name: "Karkala Tejas Pai"
+    relation: family
+    note: "Brother — not in VCF, alias needed"
+
+  # ── Friends ─────────────────────────────────────────────────────────────────
+
+  - bank_pattern: "Shreyansh"
+    contact_name: "Shreyanshi"
+    relation: friend
+    note: "Token 'shreya' from Shreya Kumari falsely matches — alias runs first to fix"
+
+  - bank_pattern: "Dave Shau"
+    contact_name: "Shaunakali Dave"
+    relation: friend
+    note: "Contact added to VCF after initial import — alias ensures future imports catch it"
+
+  - bank_pattern: "K K Kalya"
+    contact_name: "Kalyaan Gurudev"
+    relation: friend
+    note: "Initials format — token match can't bridge K K → Kalyaan"
