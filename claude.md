@@ -201,7 +201,7 @@ uv run python eval.py --out results.csv  # per-row CSV dump
 
 ## Block 6B — Pattern-Enriched LLM Context (Ambiguous UPI Transactions)
 
-**Status:** ⬜ Not started
+**Status:** ⬜ Skipped — not needed
 
 **Role:** Reduce the LLM fallback % for ambiguous UPI transactions (primarily auto-rickshaws and
 similar cash-substitute payments) by passing structured pattern context alongside the raw 
@@ -294,8 +294,7 @@ of CC + bank statements), skip this block — it may not be needed.
 
 **Output:**
 
-> *Fill in when done. Canara fallback % before and after, patterns file path, any patterns that 
-> fired unexpectedly (false positives to tune).*
+> **Skipped.** Canara eval (2026-06-12): fallback 15.7% with corrections — just above 15% gate, but remaining errors are not UPI pattern problems. Breakdown: Income (31 rows, person UPI transfers handled by contact_match in production + cashback not keyword-fixable), Health & Medical (16 rows, Apple Media subs miscategorized in ground truth), Refund (11 rows, structural eval limitation). No auto-rickshaw UPI pattern emerged as significant. PatternMatcher not worth building.
 
 ---
 
@@ -526,15 +525,78 @@ Do these in sequence — each block depends on the previous:
 
 ### Ongoing data tasks to stay on top of
 - Download CC statements monthly (all 4 cards now: HDFC Moneyback, Amazon ICICI, Axis Supermoney, Tata Neu HDFC) — name per convention, run dry-run before committing
-- Re-export `contacts/contacts.vcf` when you add/rename contacts in phone
+- Re-export `contacts/contacts.vcf` when you add/rename contacts in phone — Karkala Tejas Pai (brother) not in VCF yet, add him
 - Add new aliases to `config/contact_aliases.yaml` whenever a dry-run shows an unknown person payment
+- Run `uv run python recurring.py --tag --save` monthly after importing new statements — catches recurring Others not yet in corrections DB
 
-### Pending keyword additions
-- **Rent — Kusum Devi**: rent is paid via UPI from Canara bank account to Kusum Devi. Once Canara stmt dry-run is done, check the exact description format and add her canonical name as a keyword under `Rent` in `config/categories.yaml`.
+### Recurring auto-debit detection (future code idea)
+
+Discovered during Phase 2 gut-check: `Ach D- Prp...` debits (Propelld EMI) were landing in `Other` / `Income` because the description has no readable keyword — just an opaque NACH reference number. Fixed with a specific keyword (`ach d- prp`), but this pattern will recur for any new loan or insurance auto-debit that uses NACH.
+
+**The general problem:** NACH/ACH auto-debits have machine-generated descriptions with no merchant name. Keyword rules can't catch them unless we know the exact prefix upfront.
+
+**Signals that identify a transaction as a recurring auto-debit:**
+1. Fixed amount (same ₹ ± 1% across multiple months)
+2. Fixed day-of-month (±2 days)
+3. Same source account
+4. Description matches NACH pattern: starts with `Ach D-`, `Nach D-`, `ECS D-`, or similar
+5. 3+ occurrences = high confidence it's a standing instruction
+
+**Proposed logic (build when needed — probably Phase 3):**
+
+```python
+def detect_recurring_autodebits(source_id: str, lookback_months: int = 6):
+    """
+    Scan DB for transactions on source_id that:
+    - Are debits with NACH-style descriptions (Ach D-, Nach D-, ECS D-)
+    - Appear with same amount (±1%) on same day-of-month for 3+ months
+    Returns list of candidate recurring debits with suggested category.
+    """
+    # Query all NACH-pattern debits on account
+    # Group by (description_prefix, amount_bucket, day_of_month)
+    # If group size >= 3 → flag as recurring auto-debit
+    # Suggest category: EMI & Loan (if source is acc_hdfc_emi or contains 'prp'/'loan')
+    #                   Investment & SIP (if source is acc_bob_sip or contains 'sip'/'mf')
+    #                   Insurance (if description contains 'lic'/'star health'/'hdfc life')
+```
+
+**When to build:** When a new auto-debit appears in dry-run that falls to `Other` and doesn't have a readable keyword. Add keyword first (quick fix), then build the detector if it keeps happening.
+
+### Phase 2 sign-off fixes (2026-06-12)
+
+**Bug: CC Payment rows in genuine_spend**
+- Root cause: categorizer assigns `category = 'Credit Card Payment'` via YAML keywords but never sets `transaction_type` — DB default `genuine_spend` fires incorrectly.
+- Fix: `main.py` post-categorization step now auto-sets `transaction_type = 'cc_settlement'` + `is_internal_transfer = 1` for all CC Payment rows.
+- Backfill: 43 rows fixed in DB (CC statement credits, Bppy CC Payment debits, Simpl payments on savings accounts).
+
+**Bug: Propelld EMI landing in Other / Income**
+- Two tranches: `Ach D- Prp642655` / `Prp766294` on `acc_hdfc_emi` (Jun–Dec 2025), `Debit Achdr Nach...Prp552813` on `acc_sbi_salary` (Jan–Mar 2025, before EMI moved to HDFC).
+- Fix: keyword `ach d- prp` added to `EMI & Loan` in `categories.yaml` (covers HDFC format). SBI format rows fixed manually in DB (pattern stopped Mar 2025, won't recur).
+- 9 rows total fixed to `EMI & Loan`.
+
+**New: `recurring.py` — recurring untagged merchant detector**
+- Scans DB for canonical_merchants appearing in Other across 2+ months → surfaces for one-time tagging → saves to corrections DB → auto-tagged on all future imports.
+- Run: `uv run python recurring.py` (list), `--tag --save` (interactive tag session), `--min-months N`, `--source acc_canara_daily`.
+- Session 2026-06-12: 7 merchants tagged — Kusum Devi (Rent), Pune Metr (Fuel & Transport), Apple Med (Entertainment), Bigtree (Entertainment), Alinaqui Kasam Chi Ni (Food), Aryas Kit (Food), Darlings (Food).
+
+**Bug: Contact match not firing for 4 known people**
+- Shreyansh: token "shreya" from wrong contact "Shreya Kumari" beat correct "Shreyanshi" via token match.
+- Karkala T (Karkala Tejas Pai): not in VCF at all.
+- Dave Shau (Shaunak Dave): contact added to VCF after initial import.
+- K K Kalya (Kalyaan Gurudev): initials format — "kalyaan" not a substring of "k k kalya".
+- Fix: 4 aliases added to `config/contact_aliases.yaml`. Alias step runs before token match — all 4 now resolve at confidence 0.95.
+- Backfill: 29 existing DB rows updated with `splitwise_candidate = 1`, `category_source = 'contact_match'`.
+
+**Data: DB state at Phase 2 close**
+- Total rows: ~2,800+ (all 2025 months, all sources: Canara, HDFC EMI, SBI salary, BOB SIP, HDFC Moneyback CC, Amazon ICICI CC)
+- 2026 data: deliberately not loaded — deferred until Phase 4 agentic system is built
+- `transaction_type` values: `genuine_spend` | `cc_settlement` | `internal_transfer` | `refund`
+- All CC Payment rows correctly `cc_settlement`. All Propelld EMI rows correctly `EMI & Loan`.
 
 ### Things to NOT forget
 - `--dry-run` → `import_corrections.py --save` for fresh months (INSERT flow)
 - `review.py export` → `review.py apply --save` for retroactive fixes (UPDATE flow)
+- `recurring.py --tag --save` → run monthly, tags new recurring Others into corrections DB
 - Never commit `config/passwords.yaml`, `data/db/finance.db`, or `dry_run_*.csv`
 
 ---
@@ -543,7 +605,7 @@ Do these in sequence — each block depends on the previous:
 
 ## Phase 3 Placeholder — UI, Dashboard & Natural Language Q&A
 
-**Status:** ⬜ Not started — start after Phase 2 "Done" criteria are met.
+**Status:** ⬜ Not started — Phase 2 done criteria met 2026-06-12. Ready to start.
 
 **What goes here:** This is the phase where you stop running CLI commands and start interacting with your data through a proper interface. Three components:
 
