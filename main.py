@@ -80,6 +80,14 @@ def process_statement(file_path: str, dry_run: bool = False, csv_path: str = Non
     # 5+6. Categorize (dedup against DB happens in live path only, after statement_log check)
     txn_dicts = categorize_transactions(txn_dicts)
 
+    # Post-categorization: mark CC bill payment rows as cc_settlement + internal transfer.
+    # The categorizer assigns category = 'Credit Card Payment' via YAML keywords but never sets
+    # transaction_type — so the DB default ('genuine_spend') fires incorrectly for these rows.
+    for txn in txn_dicts:
+        if txn.get("category") == "Credit Card Payment":
+            txn["transaction_type"] = "cc_settlement"
+            txn["is_internal_transfer"] = 1
+
     if dry_run:
         # ── DRY RUN: export to CSV inside dry_runs/<YYYYMMDD_HHMMSS>/ ─────
         # Use shared run folder with run_timestamp so all files from one invocation land together
