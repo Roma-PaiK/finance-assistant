@@ -16,6 +16,7 @@ Phase 3: Splitwise API sync (push directly to app) — not implemented here.
 
 import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import csv
 import argparse
 from datetime import date

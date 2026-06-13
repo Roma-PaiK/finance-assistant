@@ -30,12 +30,14 @@ Two modes:
 
 import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import yaml
 import pandas as pd
 from collections import Counter
 from datetime import datetime as dt
+from core.corrections_merge import merge_transfer_type as _merge_transfer_type
 
-CONFIG_DIR      = os.path.join(os.path.dirname(__file__), "config")
+CONFIG_DIR      = os.path.join(os.path.dirname(__file__), "..", "config")
 CATEGORIES_YAML = os.path.join(CONFIG_DIR, "categories.yaml")
 ACCOUNTS_YAML   = os.path.join(CONFIG_DIR, "accounts.yaml")
 
@@ -47,19 +49,6 @@ def _load_categories() -> list[str]:
         cfg = yaml.safe_load(f)
     return list(cfg.get("categories", {}).keys())
 
-
-def _merge_transfer_type(category: str, transfer_type: str) -> tuple[str, bool]:
-    """Same logic as import_corrections. Returns (final_category, needs_review)."""
-    if category != "Internal Transfer":
-        return category, False
-    t = (transfer_type or "").strip().lower()
-    if t == "self":
-        return "Internal Transfer — Self", False
-    elif t in ("other", "others"):
-        return "Internal Transfer", False
-    elif t == "unknown":
-        return "Internal Transfer", True
-    return "Internal Transfer", False
 
 
 # ── EXPORT ────────────────────────────────────────────────────────────────────

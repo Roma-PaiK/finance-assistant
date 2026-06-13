@@ -10,6 +10,7 @@ Usage:
 
 import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import hashlib
 import pandas as pd
 from parsers.detector import get_parser_and_password

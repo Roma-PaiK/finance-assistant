@@ -22,14 +22,16 @@ cache so all future transactions from that merchant are auto-tagged.
 
 import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import yaml
 import pandas as pd
 from collections import Counter
 from core.corrections_db import upsert, stats, init_corrections_table
+from core.corrections_merge import merge_transfer_type
 from core.db import get_connection, init_db
 from core.description_cleaner import get_canonical_merchant
 
-CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
+CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "config")
 ACCOUNTS_YAML    = os.path.join(CONFIG_DIR, "accounts.yaml")
 CATEGORIES_YAML  = os.path.join(CONFIG_DIR, "categories.yaml")
 
@@ -50,26 +52,6 @@ def _load_valid_categories() -> set[str]:
         cfg = yaml.safe_load(f)
     return set(cfg.get("categories", {}).keys())
 
-
-# ── Merge logic ───────────────────────────────────────────────────────────────
-
-def merge_transfer_type(category: str, transfer_type: str) -> tuple[str, bool]:
-    """
-    Apply transfer_type to Internal Transfer rows.
-    Returns (final_category, needs_review).
-    needs_review=True when transfer_type=unknown.
-    """
-    if category != "Internal Transfer":
-        return category, False
-    t = (transfer_type or "").strip().lower()
-    if t == "self":
-        return "Internal Transfer — Self", False
-    elif t in ("other", "others"):
-        return "Internal Transfer", False
-    elif t == "unknown":
-        return "Internal Transfer", True
-    else:
-        return "Internal Transfer", False  # blank = leave as-is
 
 
 def resolve_row(row: pd.Series, label_to_id: dict, valid_categories: set) -> dict:

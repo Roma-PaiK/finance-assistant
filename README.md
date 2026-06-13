@@ -11,7 +11,7 @@ brew install ollama
 ollama pull llama3
 
 # Initialise the database
-uv run main.py --init
+uv run python cli/main.py --init
 ```
 
 ---
@@ -21,20 +21,20 @@ uv run main.py --init
 ### Dry run (preview only, no DB write)
 ```bash
 # Outputs a timestamped CSV so you can review categories before committing
-uv run main.py your_statement.xlsx --dry-run
+uv run python cli/main.py your_statement.xlsx --dry-run
 
 # Custom CSV output path
-uv run main.py your_statement.xlsx --dry-run --csv my_review.csv
+uv run python cli/main.py your_statement.xlsx --dry-run --csv my_review.csv
 ```
 
 ### Commit to DB (after you're happy with dry run)
 ```bash
-uv run main.py your_statement.xlsx
+uv run python cli/main.py your_statement.xlsx
 ```
 
 ### Process multiple files at once
 ```bash
-uv run main.py sbi_jan.xlsx canara_jan.pdf hdfc_cc_jan.pdf
+uv run python cli/main.py sbi_jan.xlsx canara_jan.pdf hdfc_cc_jan.pdf
 ```
 
 > **File naming convention** — include the bank name so auto-detection works:
@@ -54,25 +54,25 @@ uv run main.py sbi_jan.xlsx canara_jan.pdf hdfc_cc_jan.pdf
 
 ```bash
 # Summary + last 30 transactions
-uv run check_db.py
+uv run python scripts/check_db.py
 
 # All transactions (no limit)
-uv run check_db.py --all
+uv run python scripts/check_db.py --all
 
 # Filter by month
-uv run check_db.py --month 2025-01
+uv run python scripts/check_db.py --month 2025-01
 
 # Category spend breakdown
-uv run check_db.py --category
+uv run python scripts/check_db.py --category
 
 # Category breakdown for a specific month
-uv run check_db.py --category --month 2025-01
+uv run python scripts/check_db.py --category --month 2025-01
 
 # Show only uncategorized / 'Other' transactions
-uv run check_db.py --uncategorized
+uv run python scripts/check_db.py --uncategorized
 
 # Uncategorized for a specific month
-uv run check_db.py --uncategorized --month 2025-01
+uv run python scripts/check_db.py --uncategorized --month 2025-01
 ```
 
 ---
@@ -82,20 +82,20 @@ uv run check_db.py --uncategorized --month 2025-01
 ### Re-run categorization on existing DB data (after editing rules)
 ```bash
 # Rules only (fast, no Ollama)
-uv run recategorize.py --no-llm
+uv run python scripts/recategorize.py --no-llm
 
 # Rules + Ollama LLM fallback
-uv run recategorize.py
+uv run python scripts/recategorize.py
 
 # Re-categorize one month only
-uv run recategorize.py --month 2025-01 --no-llm
+uv run python scripts/recategorize.py --month 2025-01 --no-llm
 ```
 
 > **Workflow for fixing bad categories:**
-> 1. Run `uv run check_db.py --uncategorized` to see what's wrong
+> 1. Run `uv run python scripts/check_db.py --uncategorized` to see what's wrong
 > 2. Add keywords to `config/categories.yaml` under the right category
-> 3. Run `uv run recategorize.py --no-llm` to apply
-> 4. Run `uv run check_db.py --category` to verify
+> 3. Run `uv run python scripts/recategorize.py --no-llm` to apply
+> 4. Run `uv run python scripts/check_db.py --category` to verify
 
 ---
 
@@ -103,19 +103,19 @@ uv run recategorize.py --month 2025-01 --no-llm
 
 ```bash
 # Clear ALL transactions (will ask for confirmation)
-uv run clear_db.py
+uv run python scripts/clear_db.py
 
 # Clear without confirmation prompt
-uv run clear_db.py --force
+uv run python scripts/clear_db.py --force
 
 # Clear one specific month only
-uv run clear_db.py --month 2025-01
+uv run python scripts/clear_db.py --month 2025-01
 
 # Clear one specific account only
-uv run clear_db.py --source acc_sbi_salary
+uv run python scripts/clear_db.py --source acc_sbi_salary
 
 # Clear one account for one month
-uv run clear_db.py --source acc_sbi_salary --month 2025-01
+uv run python scripts/clear_db.py --source acc_sbi_salary --month 2025-01
 ```
 
 > **Source IDs for --source flag:**
@@ -148,18 +148,18 @@ uv run clear_db.py --source acc_sbi_salary --month 2025-01
 
 ```bash
 # 1. Dry run all new statements
-uv run main.py sbi_feb.xlsx canara_feb.pdf hdfc_cc_feb.pdf --dry-run
+uv run python cli/main.py sbi_feb.xlsx canara_feb.pdf hdfc_cc_feb.pdf --dry-run
 
 # 2. Open the CSV, check categories look right
 
 # 3. If anything's wrong, edit config/categories.yaml then dry run again
-uv run main.py sbi_feb.xlsx --dry-run
+uv run python cli/main.py sbi_feb.xlsx --dry-run
 
 # 4. Happy? Commit everything to DB
-uv run main.py sbi_feb.xlsx canara_feb.pdf hdfc_cc_feb.pdf
+uv run python cli/main.py sbi_feb.xlsx canara_feb.pdf hdfc_cc_feb.pdf
 
 # 5. Verify
-uv run check_db.py --month 2025-02 --category
+uv run python scripts/check_db.py --month 2025-02 --category
 ```
 
 ---
@@ -168,29 +168,41 @@ uv run check_db.py --month 2025-02 --category
 
 ```
 finance_assistant/
-├── main.py                  # Entry point — parse + categorize + DB write
-├── check_db.py              # Inspect what's in the DB
-├── clear_db.py              # Delete transactions from DB
-├── recategorize.py          # Re-run categorization on existing DB data
-├── pyproject.toml           # uv project config + dependencies
-├── uv.lock                  # uv lockfile (auto-managed)
-├── requirements.txt         # pip-compatible dependency list
-├── .python-version          # Python version pin for uv
+├── cli/                     # User-facing CLI scripts (run regularly)
+│   ├── main.py              # Entry point — parse + categorize + DB write
+│   ├── report.py            # Monthly/yearly spend report
+│   ├── review.py            # Export DB rows for review; apply corrections
+│   ├── import_corrections.py # Commit dry-run CSV corrections to DB
+│   ├── reconcile.py         # CC bill payment reconciliation
+│   ├── splitwise.py         # Split expense tracking
+│   └── recurring.py         # Recurring-untagged merchant detector
+│
+├── scripts/                 # Dev / maintenance one-shots
+│   ├── eval.py              # Categorization accuracy harness
+│   ├── recategorize.py      # Re-run categorization on existing DB data
+│   ├── check_db.py          # Inspect what's in the DB
+│   └── clear_db.py          # Delete transactions from DB
+│
+├── core/                    # Library modules (imported by cli/ and scripts/)
+│   ├── db.py                # SQLite read/write layer
+│   ├── categorizer.py       # Rules engine + Ollama LLM fallback
+│   ├── deduplicator.py      # Internal transfer detection + dedup
+│   ├── description_cleaner.py  # Cleans raw bank description strings
+│   ├── reconciler.py        # CC settlement matching logic
+│   ├── contact_matcher.py   # VCF contact → merchant matching
+│   └── corrections_db.py    # Corrections cache (merchant → category)
+│
+├── parsers/
+│   ├── base.py              # SmartParser + BANK_CONFIGS (all banks in one place)
+│   ├── detector.py          # Auto-selects the right config per file
+│   └── validator.py         # Balance-math validation
 │
 ├── config/
 │   ├── accounts.yaml        # Your accounts + card details + transfer rules
 │   ├── passwords.yaml       # PDF/Excel passwords (never commit this)
-│   └── categories.yaml      # Keyword → category mapping rules
-│
-├── parsers/
-│   ├── base.py              # SmartParser + BANK_CONFIGS (all banks in one place)
-│   └── detector.py          # Auto-selects the right config per file
-│
-├── core/
-│   ├── db.py                # SQLite read/write layer
-│   ├── categorizer.py       # Rules engine + Ollama LLM fallback
-│   ├── deduplicator.py      # Internal transfer detection + dedup
-│   └── description_cleaner.py  # Cleans raw bank description strings
+│   ├── categories.yaml      # Keyword → category mapping rules
+│   ├── contact_aliases.yaml # Bank description → contact name aliases
+│   └── budget.yaml          # Monthly budget targets
 │
 └── data/
     └── db/

@@ -9,6 +9,8 @@ Usage:
 """
 
 import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.db import query, get_connection
 from core.categorizer import categorize_transactions
 from core.description_cleaner import clean_description

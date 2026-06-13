@@ -12,6 +12,7 @@ Usage:
 
 import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import argparse
 import yaml
 from datetime import datetime, date
@@ -19,7 +20,7 @@ from collections import defaultdict
 
 from core.db import query, init_db
 
-BUDGET_PATH = os.path.join(os.path.dirname(__file__), "config", "budget.yaml")
+BUDGET_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "budget.yaml")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
