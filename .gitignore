@@ -3,6 +3,7 @@ config/passwords.yaml
 config/accounts.yaml
 data/
 dry_runs/
+logs/
 data_preview/
 data_corrections/
 contacts/

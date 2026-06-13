@@ -1,6 +1,7 @@
 # Passwords and sensitive config
 config/passwords.yaml
 config/accounts.yaml
+logs/
 
 # Bank statements (raw files)
 data/
