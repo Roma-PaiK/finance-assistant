@@ -5,7 +5,7 @@ All transactions are stored here after parsing + categorization.
 
 import sqlite3
 import os
-from datetime import datetime
+from core.dateparse import parse_date_to_iso as _parse_date_to_iso
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "db", "finance.db")
 
@@ -113,15 +113,6 @@ def init_db():
     _backfill_transaction_type(conn)
     conn.close()
 
-
-def _parse_date_to_iso(date_str: str) -> str | None:
-    """Convert DD/MM/YYYY (or YYYY-MM-DD) → ISO YYYY-MM-DD for SQL date filtering."""
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y"):
-        try:
-            return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-    return None
 
 
 def _backfill_date_parsed(conn: sqlite3.Connection):
