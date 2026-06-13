@@ -19,22 +19,17 @@ import re
 import yaml
 import os
 
-ACCOUNTS_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "accounts.yaml")
+ACCOUNTS_PATH      = os.path.join(os.path.dirname(__file__), "..", "config", "accounts.yaml")
+_DESC_PATTERNS_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "description_patterns.yaml")
 
-# IFSC-prefix → bank display name
-BANK_CODE_MAP = {
-    "cnrb": "Canara Bank",
-    "hdfc": "HDFC Bank",
-    "sbin": "SBI",
-    "icic": "ICICI Bank",
-    "utib": "Axis Bank",
-    "barb": "Bank of Baroda",
-    "punb": "Punjab National Bank",
-    "kkbk": "Kotak Bank",
-    "ioba": "Indian Overseas Bank",
-    "ptybl": "Paytm Bank",
-    "yesbopt": "Yes Bank",
-}
+
+def _load_desc_patterns() -> dict:
+    with open(_DESC_PATTERNS_PATH) as f:
+        return yaml.safe_load(f)
+
+
+_desc_patterns: dict = _load_desc_patterns()
+BANK_CODE_MAP: dict[str, str] = _desc_patterns["bank_code_map"]
 
 # Trailing noise common in CC merchant strings
 _CC_LOCATION_NOISE = re.compile(
@@ -49,9 +44,7 @@ _DATE_SUFFIX = re.compile(r'\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}.*$')
 _AT_BRANCH = re.compile(r'\s+AT\s+\d+\s+\w+.*$', re.IGNORECASE)
 _OF_BRANCH = re.compile(r'\s+OF\s+\w+\s+AT.*$', re.IGNORECASE)
 
-# SBI statement prefix tokens to drop after main extraction
-_SBI_PREFIXES = ("WDL TFR", "DEP TFR", "INT CR", "INT.CR",
-                 "ACH DR", "ACH CR", "ATM WDL", "POS DR", "CLG DR", "CLG CR")
+_SBI_PREFIXES: tuple = tuple(_desc_patterns["sbi_prefixes"])
 
 # Patterns that indicate salary / payroll
 _SALARY_HINTS = re.compile(
@@ -245,7 +238,7 @@ def _extract(raw: str) -> tuple[str, str]:
     return (cleaned or raw.strip()), "other"
 
 
-_ACRONYMS = re.compile(r'\b(atm|upi|sbi|hdfc|icici|axis|emi|sip|neft|imps|ppf|fd|otp|kyc|ltd|pvt)\b', re.IGNORECASE)
+_ACRONYMS = re.compile(r'\b(' + '|'.join(_desc_patterns["acronyms"]) + r')\b', re.IGNORECASE)
 
 def _normalize(merchant: str) -> str:
     """Title-case, collapse whitespace, restore known acronyms to uppercase."""

@@ -13,6 +13,18 @@ llm_excluded:
   - Credit Card Payment
   - EMI & Loan
 
+raw_rules:
+  - pattern: 'cmp\s+\w.+\s+ltd'
+    category: Income
+  - pattern: 'ach\s+dr.+sip'
+    category: Investment & SIP
+  - pattern: 'ach\s+dr.+mutual'
+    category: Investment & SIP
+  - pattern: 'ach\s+dr.+loan'
+    category: EMI & Loan
+  - pattern: 'ach\s+dr.+finance'
+    category: EMI & Loan
+
 categories:
   Food & Dining:
     hint: "restaurants, food delivery (Swiggy/Zomato), cafes, dhabas, hospitality venues, catering"

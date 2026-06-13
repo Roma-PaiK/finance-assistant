@@ -21,18 +21,14 @@ import os
 import re
 import yaml
 from difflib import SequenceMatcher
+from core.settings import SETTINGS
 
 CONTACTS_DIR  = os.path.join(os.path.dirname(__file__), "..", "contacts")
 VCF_PATH      = os.path.join(CONTACTS_DIR, "contacts.vcf")
 ALIASES_PATH  = os.path.join(os.path.dirname(__file__), "..", "config", "contact_aliases.yaml")
 
-# Min token length to use in substring matching (avoids "Ed", "An" false hits)
-MIN_TOKEN_LEN = 4
-
-# Fuzzy match threshold — raised to eliminate similar-but-different names
-# e.g. "Chaithra" vs "Chaitali" ≈ 0.75 (eliminated); truncations like
-# "Suresh Pa" vs "Suresh Pai" ≈ 0.95 (safe)
-FUZZY_THRESHOLD = 0.85
+MIN_TOKEN_LEN: int   = SETTINGS["contact_matcher"]["min_token_len"]
+FUZZY_THRESHOLD: float = SETTINGS["contact_matcher"]["fuzzy_threshold"]
 
 
 def _clean_name(name: str) -> str:

@@ -15,18 +15,17 @@ Usage (via reconcile.py CLI — do not call directly):
 import re
 import yaml
 import os
-from datetime import datetime, timedelta
+from datetime import timedelta
 from core.db import get_connection, query
+from core.dateparse import parse_date
+from core.settings import SETTINGS
 
 CONFIG_DIR    = os.path.join(os.path.dirname(__file__), "..", "config")
 ACCOUNTS_YAML = os.path.join(CONFIG_DIR, "accounts.yaml")
 
-# Amount tolerance: payment must be within this % or ₹ amount of CC total to match
-AMOUNT_TOLERANCE_PCT = 0.02   # 2%
-AMOUNT_TOLERANCE_ABS = 150    # ₹150 flat
-
-# How many days back from payment date to look for CC charges
-BILLING_WINDOW_DAYS = 45
+AMOUNT_TOLERANCE_PCT: float = SETTINGS["reconciler"]["amount_tolerance_pct"]
+AMOUNT_TOLERANCE_ABS: float = SETTINGS["reconciler"]["amount_tolerance_abs"]
+BILLING_WINDOW_DAYS: int    = SETTINGS["reconciler"]["billing_window_days"]
 
 # Keyword patterns per CC source_id — matched against description + raw_description on savings account
 CC_PAYMENT_PATTERNS: dict[str, list[str]] = {
@@ -102,15 +101,6 @@ def _detect_cc_for_payment(txn: dict, cc_accounts: list[dict]) -> list[str]:
     return matched
 
 
-def _parse_date(date_str: str) -> datetime:
-    """Parse date string in YYYY-MM-DD or DD/MM/YYYY format."""
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
-        try:
-            return datetime.strptime(date_str, fmt)
-        except ValueError:
-            continue
-    raise ValueError(f"Unrecognised date format: {date_str!r}")
-
 
 def _cc_total_for_period(cc_source_id: str, before_date: str, days: int) -> tuple[float, str, int]:
     """
@@ -118,7 +108,7 @@ def _cc_total_for_period(cc_source_id: str, before_date: str, days: int) -> tupl
     Returns (total, period_label, txn_count).
     Filters in Python to handle mixed date formats in DB (DD/MM/YYYY).
     """
-    dt_end   = _parse_date(before_date)
+    dt_end   = parse_date(before_date)
     dt_start = dt_end - timedelta(days=days)
 
     rows = query(
@@ -130,7 +120,7 @@ def _cc_total_for_period(cc_source_id: str, before_date: str, days: int) -> tupl
 
     in_window = [
         r for r in rows
-        if dt_start <= _parse_date(r["date"]) <= dt_end
+        if (dt := parse_date(r["date"])) is not None and dt_start <= dt <= dt_end
     ]
     total        = sum(r["amount"] for r in in_window)
     period_label = f"{dt_start.strftime('%Y-%m-%d')} → {dt_end.strftime('%Y-%m-%d')}"

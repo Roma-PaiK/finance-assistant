@@ -1,0 +1,11 @@
+reconciler:
+  amount_tolerance_pct: 0.02   # 2% — payment vs CC total
+  amount_tolerance_abs: 150    # ₹150 flat tolerance
+  billing_window_days: 45      # how far back to look for CC charges
+
+validator:
+  balance_tolerance: 2.0       # rupees — covers rounding in bank statements
+
+contact_matcher:
+  fuzzy_threshold: 0.85        # SequenceMatcher threshold for name fuzzy match
+  min_token_len: 4             # min chars for a name token to be used in substring match

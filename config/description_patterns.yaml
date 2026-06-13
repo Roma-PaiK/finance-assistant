@@ -1,0 +1,42 @@
+bank_code_map:
+  cnrb: Canara Bank
+  hdfc: HDFC Bank
+  sbin: SBI
+  icic: ICICI Bank
+  utib: Axis Bank
+  barb: Bank of Baroda
+  punb: Punjab National Bank
+  kkbk: Kotak Bank
+  ioba: Indian Overseas Bank
+  ptybl: Paytm Bank
+  yesbopt: Yes Bank
+
+sbi_prefixes:
+  - WDL TFR
+  - DEP TFR
+  - INT CR
+  - INT.CR
+  - ACH DR
+  - ACH CR
+  - ATM WDL
+  - POS DR
+  - CLG DR
+  - CLG CR
+
+acronyms:
+  - atm
+  - upi
+  - sbi
+  - hdfc
+  - icici
+  - axis
+  - emi
+  - sip
+  - neft
+  - imps
+  - ppf
+  - fd
+  - otp
+  - kyc
+  - ltd
+  - pvt

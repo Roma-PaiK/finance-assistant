@@ -21,6 +21,7 @@ import os
 import json
 import requests
 from core.description_cleaner import clean_description
+from core.dateparse import parse_date
 import core.corrections_db as corrections_db
 from core.contact_matcher import get_contacts, get_aliases, match_contact
 
@@ -61,17 +62,13 @@ def load_llm_excluded() -> set[str]:
     return set(cfg.get("llm_excluded", []))
 
 
-# Raw description pattern rules — regex only, for patterns YAML substring matching can't express.
-# Keep this list minimal. Simple keywords belong in config/categories.yaml instead.
-# Redundant rules (imps/neft/atm/bajaj/int cr) removed — covered by YAML keywords.
-# Broad UPI bank-name rules removed — matched merchant's bank, not own account (false positives).
-RAW_RULES = [
-    (r"cmp\s+\w.+\s+ltd",   "Income"),           # SBI salary: "CMP <company> LTD"
-    (r"ach\s+dr.+sip",      "Investment & SIP"),  # SIP NACH auto-debit
-    (r"ach\s+dr.+mutual",   "Investment & SIP"),  # Mutual fund NACH auto-debit
-    (r"ach\s+dr.+loan",     "EMI & Loan"),         # Loan EMI NACH auto-debit
-    (r"ach\s+dr.+finance",  "EMI & Loan"),         # Finance EMI NACH auto-debit
-]
+def _load_raw_rules() -> list[tuple[str, str]]:
+    with open(CONFIG_PATH) as f:
+        cfg = yaml.safe_load(f)
+    return [(r["pattern"], r["category"]) for r in cfg.get("raw_rules", [])]
+
+
+RAW_RULES = _load_raw_rules()
 
 
 def _load_own_account_last4() -> set[str]:
@@ -567,16 +564,6 @@ def _detect_refunds(transactions: list[dict], days_window: int = 30):
     If found within days_window, mark credit as transaction_type = 'refund'.
     Handles cases like IPO allotment refunds (debit → credit after days, not same day).
     """
-    from datetime import datetime, timedelta
-
-    def parse_date(d: str) -> datetime | None:
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
-            try:
-                return datetime.strptime(d, fmt)
-            except ValueError:
-                continue
-        return None
-
     # Group debits by (merchant, amount) for fast lookup
     debits_by_key = {}
     for idx, txn in enumerate(transactions):

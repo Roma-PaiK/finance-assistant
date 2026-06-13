@@ -13,9 +13,9 @@ Validation statuses:
 
 from dataclasses import dataclass
 from typing import Optional
+from core.settings import SETTINGS
 
-
-BALANCE_TOLERANCE = 2.0  # rupees — covers rounding in bank statements
+BALANCE_TOLERANCE: float = SETTINGS["validator"]["balance_tolerance"]
 
 
 @dataclass
