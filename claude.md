@@ -42,7 +42,7 @@ These are the decisions that keep this phase from sprawling. They are load-beari
 
 ## Layer A — Deterministic Tool Library `[CC]`
 
-**Status:** ⬜ Not started
+**Status:** ✅ Done
 
 **Role:** The agent's hands. Pure, read-only, exact functions over the post-tagging DB. This is also most of the unbuilt "insights/advice" layer — build it as plain tested functions with **zero LLM involvement**.
 
@@ -57,7 +57,17 @@ These are the decisions that keep this phase from sprawling. They are load-beari
 
 **Output:**
 
-> *Fill in: module path (e.g. `core/analytics.py`), list of tools shipped, test file path, one sample output per tool.*
+- **Module:** `core/analytics.py`
+- **Test file:** `tests/test_analytics.py` (30 tests, all passing)
+- **Tools shipped:**
+  - `spend_by_category(month)` → `dict[str, float]` — splitwise-aware category totals
+  - `monthly_trend(category, n_months, as_of_month=None)` → `list[dict]` — per-month spend for a category
+  - `top_merchants(month, n=10)` → `list[dict]` — top N merchants by debit spend
+  - `savings_rate(month)` → `dict` — salary / SIP / genuine spend / savings rate %
+  - `reconciled_totals(month)` → `dict` — genuine spend + CC reconciliation state
+  - `category_growth(window=3, as_of_month=None)` → `list[dict]` — recent vs prior window avg per category
+- **Bug fixed:** `cli/report.py` was querying `category = 'Salary'` for income; fixed to `category = 'Income'` in `savings_rate()`.
+- **`cli/report.py`** updated to import from `core/analytics.py` (no duplicate logic).
 
 ---
 

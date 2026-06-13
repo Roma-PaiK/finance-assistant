@@ -19,6 +19,7 @@ from datetime import datetime, date
 from collections import defaultdict
 
 from core.db import query, init_db
+from core.analytics import spend_by_category, top_merchants, savings_rate
 
 BUDGET_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "budget.yaml")
 
@@ -152,48 +153,6 @@ def _print_budget_report(month: str, cats: dict[str, float]):
 
 # ── DB queries ────────────────────────────────────────────────────────────────
 
-def _get_category_totals(month: str) -> dict[str, float]:
-    """
-    Genuine spend totals per category for a given YYYY-MM.
-    Uses your_share_amount where a split is confirmed — net spend, not gross.
-    """
-    rows = query("""
-        SELECT category,
-               SUM(
-                 CASE
-                   WHEN splitwise_confirmed = 1 AND your_share_amount IS NOT NULL
-                   THEN your_share_amount
-                   ELSE amount
-                 END
-               ) as total
-        FROM transactions
-        WHERE month = ?
-          AND transaction_type = 'genuine_spend'
-          AND txn_type = 'debit'
-        GROUP BY category
-        ORDER BY total DESC
-    """, (month,))
-    return {r["category"]: r["total"] for r in rows if r["category"]}
-
-
-def _get_top_merchants(month: str, n: int = 5) -> list[dict]:
-    """Top N merchants by spend for a given month."""
-    rows = query("""
-        SELECT
-            COALESCE(NULLIF(canonical_merchant,''), description) as merchant,
-            SUM(amount) as total,
-            COUNT(*) as txn_count
-        FROM transactions
-        WHERE month = ?
-          AND transaction_type = 'genuine_spend'
-          AND txn_type = 'debit'
-        GROUP BY merchant
-        ORDER BY total DESC
-        LIMIT ?
-    """, (month, n))
-    return [dict(r) for r in rows]
-
-
 def _get_other_count(month: str) -> int:
     """Count of 'Other' category rows still in review queue."""
     rows = query("""
@@ -243,70 +202,9 @@ def _get_year_monthly(year: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _get_savings_awareness(month: str) -> dict:
-    """Block 10 — SIP outflows, salary inflow, indicative savings rate."""
-    year = month[:4]
-
-    # SIP outflows for the month (acc_bob_sip debits tagged Investment & SIP)
-    sip_rows = query("""
-        SELECT SUM(amount) as total, COUNT(*) as n
-        FROM transactions
-        WHERE month = ?
-          AND source_id = 'acc_bob_sip'
-          AND txn_type = 'debit'
-          AND category = 'Investment & SIP'
-    """, (month,))
-    sip_month = sip_rows[0]["total"] or 0.0 if sip_rows else 0.0
-    sip_count = sip_rows[0]["n"] or 0 if sip_rows else 0
-
-    # YTD SIP (acc_bob_sip, same year)
-    ytd_rows = query("""
-        SELECT SUM(amount) as total
-        FROM transactions
-        WHERE month LIKE ?
-          AND source_id = 'acc_bob_sip'
-          AND txn_type = 'debit'
-          AND category = 'Investment & SIP'
-    """, (f"{year}-%",))
-    sip_ytd = ytd_rows[0]["total"] or 0.0 if ytd_rows else 0.0
-
-    # Salary inflow (SBI salary account credits)
-    sal_rows = query("""
-        SELECT SUM(amount) as total
-        FROM transactions
-        WHERE month = ?
-          AND source_id = 'acc_sbi_salary'
-          AND txn_type = 'credit'
-          AND category = 'Salary'
-    """, (month,))
-    salary = sal_rows[0]["total"] or 0.0 if sal_rows else 0.0
-
-    # Genuine spend for the month (already computed by caller but re-query for isolation)
-    spend_rows = query("""
-        SELECT SUM(amount) as total
-        FROM transactions
-        WHERE month = ?
-          AND transaction_type = 'genuine_spend'
-          AND txn_type = 'debit'
-    """, (month,))
-    genuine_spend = spend_rows[0]["total"] or 0.0 if spend_rows else 0.0
-
-    # Indicative savings rate
-    savings_rate = ((salary - genuine_spend) / salary * 100) if salary > 0 else None
-
-    return {
-        "sip_month": sip_month,
-        "sip_count": sip_count,
-        "sip_ytd": sip_ytd,
-        "salary": salary,
-        "genuine_spend": genuine_spend,
-        "savings_rate": savings_rate,
-        "year": year,
-    }
-
-
-def _print_savings_section(data: dict):
+def _print_savings_section(data: dict, month: str):
     """Print Block 10 savings awareness section."""
+    year = month[:4]
     print(f"\n{'─'*64}")
     print(f"  Savings & Investments")
     print(f"{'─'*64}")
@@ -321,7 +219,7 @@ def _print_savings_section(data: dict):
     else:
         print(f"  SIP outflow       : — (no acc_bob_sip deductions this month)")
 
-    print(f"  SIP YTD ({data['year']})    : {_fmt_inr(data['sip_ytd'])}")
+    print(f"  SIP YTD ({year})    : {_fmt_inr(data['sip_ytd'])}")
     print(f"  Genuine spend     : {_fmt_inr(data['genuine_spend'])}")
 
     if data["savings_rate"] is not None:
@@ -355,9 +253,9 @@ def _get_year_category_breakdown(year: str) -> dict[str, dict[str, float]]:
 # ── formatters ────────────────────────────────────────────────────────────────
 
 def _print_month_report(month: str, compare_month: str | None = None, show_budget: bool = False):
-    cats = _get_category_totals(month)
-    prev_cats = _get_category_totals(compare_month or _prev_month(month))
-    top_merchants = _get_top_merchants(month)
+    cats = spend_by_category(month)
+    prev_cats = spend_by_category(compare_month or _prev_month(month))
+    merchants = top_merchants(month, n=5)
     other_count = _get_other_count(month)
     summary = _get_month_summary(month)
     compare_label = compare_month or _prev_month(month)
@@ -395,7 +293,7 @@ def _print_month_report(month: str, compare_month: str | None = None, show_budge
     print(f"\n{'─'*64}")
     print(f"  Top merchants — {month}")
     print(f"  {'─'*col_w}  {'Amount':>10}  {'Txns':>6}")
-    for m in top_merchants:
+    for m in merchants:
         name = (m["merchant"] or "Unknown")[:col_w]
         print(f"  {name:<{col_w}}  {_fmt_inr(m['total']):>10}  {m['txn_count']:>6}")
 
@@ -406,8 +304,8 @@ def _print_month_report(month: str, compare_month: str | None = None, show_budge
         _print_budget_report(month, cats)
 
     # Savings awareness (Block 10) — always shown
-    savings = _get_savings_awareness(month)
-    _print_savings_section(savings)
+    savings = savings_rate(month)
+    _print_savings_section(savings, month)
 
     print()
 
@@ -464,8 +362,8 @@ def _print_year_report(year: str):
 
 def _export_month_csv(month: str, path: str):
     import csv
-    cats = _get_category_totals(month)
-    prev_cats = _get_category_totals(_prev_month(month))
+    cats = spend_by_category(month)
+    prev_cats = spend_by_category(_prev_month(month))
     rows = []
     for cat, total in sorted(cats.items(), key=lambda x: -x[1]):
         prev = prev_cats.get(cat, 0)
@@ -495,9 +393,9 @@ def _export_month_excel(month: str, path: str):
         print("  openpyxl not installed — run: uv add openpyxl")
         return
 
-    cats = _get_category_totals(month)
-    prev_cats = _get_category_totals(_prev_month(month))
-    top_merchants = _get_top_merchants(month, n=10)
+    cats = spend_by_category(month)
+    prev_cats = spend_by_category(_prev_month(month))
+    top_m = top_merchants(month, n=10)
     summary = _get_month_summary(month)
 
     wb = openpyxl.Workbook()
@@ -537,7 +435,7 @@ def _export_month_excel(month: str, path: str):
     for cell in ws[ws.max_row]:
         cell.fill = hdr_fill
         cell.font = hdr_font
-    for m in top_merchants:
+    for m in top_m:
         ws.append([m["merchant"], round(m["total"], 2), m["txn_count"]])
 
     # Column widths
